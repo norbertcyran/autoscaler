@@ -26,6 +26,7 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/estimator"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/status"
 	"k8s.io/autoscaler/cluster-autoscaler/provisioningrequest/provreqclient"
+	"k8s.io/autoscaler/cluster-autoscaler/resourcelimits"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/scheduling"
 	ca_errors "k8s.io/autoscaler/cluster-autoscaler/utils/errors"
@@ -38,8 +39,7 @@ import (
 type ProvisioningClass interface {
 	Provision([]*apiv1.Pod, []*apiv1.Node, []*appsv1.DaemonSet,
 		map[string]*framework.NodeInfo) (*status.ScaleUpStatus, ca_errors.AutoscalerError)
-	Initialize(*context.AutoscalingContext, *ca_processors.AutoscalingProcessors, *clusterstate.ClusterStateRegistry,
-		estimator.EstimatorBuilder, taints.TaintConfig, *scheduling.HintingSimulator)
+	Initialize(*context.AutoscalingContext, *ca_processors.AutoscalingProcessors, *clusterstate.ClusterStateRegistry, estimator.EstimatorBuilder, taints.TaintConfig, *scheduling.HintingSimulator, []resourcelimits.Provider)
 }
 
 // provReqOrchestrator is an orchestrator that contains orchestrators for all supported Provisioning Classes.
@@ -60,18 +60,12 @@ func New(client *provreqclient.ProvisioningRequestClient, classes []Provisioning
 }
 
 // Initialize initialize orchestrator.
-func (o *provReqOrchestrator) Initialize(
-	autoscalingContext *context.AutoscalingContext,
-	processors *ca_processors.AutoscalingProcessors,
-	clusterStateRegistry *clusterstate.ClusterStateRegistry,
-	estimatorBuilder estimator.EstimatorBuilder,
-	taintConfig taints.TaintConfig,
-) {
+func (o *provReqOrchestrator) Initialize(autoscalingContext *context.AutoscalingContext, processors *ca_processors.AutoscalingProcessors, clusterStateRegistry *clusterstate.ClusterStateRegistry, estimatorBuilder estimator.EstimatorBuilder, taintConfig taints.TaintConfig, limitsProviders []resourcelimits.Provider) {
 	o.initialized = true
 	o.context = autoscalingContext
 	o.injector = scheduling.NewHintingSimulator()
 	for _, mode := range o.provisioningClasses {
-		mode.Initialize(autoscalingContext, processors, clusterStateRegistry, estimatorBuilder, taintConfig, o.injector)
+		mode.Initialize(autoscalingContext, processors, clusterStateRegistry, estimatorBuilder, taintConfig, o.injector, limitsProviders)
 	}
 }
 

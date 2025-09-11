@@ -1,0 +1,1003 @@
+diff --git a/cluster-autoscaler/cloudprovider/resource_limiter.go b/cluster-autoscaler/cloudprovider/resource_limiter.go
+index 561430179..5329bf6e6 100644
+--- a/cluster-autoscaler/cloudprovider/resource_limiter.go
++++ b/cluster-autoscaler/cloudprovider/resource_limiter.go
+@@ -18,9 +18,11 @@ package cloudprovider
+ 
+ import (
+ 	"fmt"
+-	"k8s.io/apimachinery/pkg/util/sets"
+ 	"math"
+ 	"strings"
++
++	apiv1 "k8s.io/api/core/v1"
++	"k8s.io/apimachinery/pkg/util/sets"
+ )
+ 
+ // ResourceLimiter contains limits (max, min) for resources (cores, memory etc.).
+@@ -88,3 +90,15 @@ func (r *ResourceLimiter) String() string {
+ 	}
+ 	return strings.Join(resourceDetails, ", ")
+ }
++
++func (r *ResourceLimiter) MatchesNode(node *apiv1.Node) bool {
++	return true
++}
++
++func (r *ResourceLimiter) MaxLimits() map[string]int64 {
++	return r.maxLimits
++}
++
++func (r *ResourceLimiter) MinLimits() map[string]int64 {
++	return r.minLimits
++}
+diff --git a/cluster-autoscaler/core/autoscaler.go b/cluster-autoscaler/core/autoscaler.go
+index 1fc3ff4e1..e6c06cc1c 100644
+--- a/cluster-autoscaler/core/autoscaler.go
++++ b/cluster-autoscaler/core/autoscaler.go
+@@ -32,6 +32,7 @@ import (
+ 	"k8s.io/autoscaler/cluster-autoscaler/expander/factory"
+ 	"k8s.io/autoscaler/cluster-autoscaler/observers/loopstart"
+ 	ca_processors "k8s.io/autoscaler/cluster-autoscaler/processors"
++	"k8s.io/autoscaler/cluster-autoscaler/resourcelimits"
+ 	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot"
+ 	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot/predicate"
+ 	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot/store"
+@@ -65,6 +66,7 @@ type AutoscalerOptions struct {
+ 	DeleteOptions          options.NodeDeleteOptions
+ 	DrainabilityRules      rules.Rules
+ 	DraProvider            *draprovider.Provider
++	LimitsProviders        []resourcelimits.Provider
+ }
+ 
+ // Autoscaler is the main component of CA which scales up/down node groups according to its configuration
+@@ -105,6 +107,7 @@ func NewAutoscaler(opts AutoscalerOptions, informerFactory informers.SharedInfor
+ 		opts.DeleteOptions,
+ 		opts.DrainabilityRules,
+ 		opts.DraProvider,
++		opts.LimitsProviders,
+ 	), nil
+ }
+ 
+@@ -163,7 +166,7 @@ func initializeDefaultOptions(opts *AutoscalerOptions, informerFactory informers
+ 	}
+ 	if opts.Backoff == nil {
+ 		opts.Backoff =
+-			backoff.NewIdBasedExponentialBackoff(opts.InitialNodeGroupBackoffDuration, opts.MaxNodeGroupBackoffDuration, opts.NodeGroupBackoffResetTimeout)
++				backoff.NewIdBasedExponentialBackoff(opts.InitialNodeGroupBackoffDuration, opts.MaxNodeGroupBackoffDuration, opts.NodeGroupBackoffResetTimeout)
+ 	}
+ 	if opts.DrainabilityRules == nil {
+ 		opts.DrainabilityRules = rules.Default(opts.DeleteOptions)
+@@ -171,6 +174,9 @@ func initializeDefaultOptions(opts *AutoscalerOptions, informerFactory informers
+ 	if opts.DraProvider == nil && opts.DynamicResourceAllocationEnabled {
+ 		opts.DraProvider = draprovider.NewProviderFromInformers(informerFactory)
+ 	}
++	if opts.LimitsProviders == nil {
++		opts.LimitsProviders = []resourcelimits.Provider{resourcelimits.NewCloudLimitersProvider(opts.CloudProvider)}
++	}
+ 
+ 	return nil
+ }
+diff --git a/cluster-autoscaler/core/scaleup/orchestrator/orchestrator.go b/cluster-autoscaler/core/scaleup/orchestrator/orchestrator.go
+index 0502462ae..179cfab72 100644
+--- a/cluster-autoscaler/core/scaleup/orchestrator/orchestrator.go
++++ b/cluster-autoscaler/core/scaleup/orchestrator/orchestrator.go
+@@ -34,6 +34,7 @@ import (
+ 	"k8s.io/autoscaler/cluster-autoscaler/processors/nodegroups"
+ 	"k8s.io/autoscaler/cluster-autoscaler/processors/nodegroupset"
+ 	"k8s.io/autoscaler/cluster-autoscaler/processors/status"
++	"k8s.io/autoscaler/cluster-autoscaler/resourcelimits"
+ 	"k8s.io/autoscaler/cluster-autoscaler/simulator"
+ 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
+ 	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
+@@ -46,7 +47,7 @@ import (
+ type ScaleUpOrchestrator struct {
+ 	autoscalingContext   *context.AutoscalingContext
+ 	processors           *ca_processors.AutoscalingProcessors
+-	resourceManager      *resource.Manager
++	resourceManager      *resourcelimits.Manager
+ 	clusterStateRegistry *clusterstate.ClusterStateRegistry
+ 	scaleUpExecutor      *scaleUpExecutor
+ 	estimatorBuilder     estimator.EstimatorBuilder
+@@ -63,18 +64,19 @@ func New() *ScaleUpOrchestrator {
+ 
+ // Initialize initializes the orchestrator object with required fields.
+ func (o *ScaleUpOrchestrator) Initialize(
+-	autoscalingContext *context.AutoscalingContext,
+-	processors *ca_processors.AutoscalingProcessors,
+-	clusterStateRegistry *clusterstate.ClusterStateRegistry,
+-	estimatorBuilder estimator.EstimatorBuilder,
+-	taintConfig taints.TaintConfig,
++		autoscalingContext *context.AutoscalingContext,
++		processors *ca_processors.AutoscalingProcessors,
++		clusterStateRegistry *clusterstate.ClusterStateRegistry,
++		estimatorBuilder estimator.EstimatorBuilder,
++		taintConfig taints.TaintConfig,
++		limitsProviders []resourcelimits.Provider,
+ ) {
+ 	o.autoscalingContext = autoscalingContext
+ 	o.processors = processors
+ 	o.clusterStateRegistry = clusterStateRegistry
+ 	o.estimatorBuilder = estimatorBuilder
+ 	o.taintConfig = taintConfig
+-	o.resourceManager = resource.NewManager(processors.CustomResourcesProcessor)
++	o.resourceManager = resourcelimits.NewResourceManager(processors.CustomResourcesProcessor, limitsProviders)
+ 	o.scaleUpExecutor = newScaleUpExecutor(autoscalingContext, processors.ScaleStateNotifier, o.processors.AsyncNodeGroupStateChecker)
+ 	o.initialized = true
+ }
+@@ -83,11 +85,11 @@ func (o *ScaleUpOrchestrator) Initialize(
+ // an unexpected error occurred. Assumes that all nodes in the cluster are ready
+ // and in sync with instance groups.
+ func (o *ScaleUpOrchestrator) ScaleUp(
+-	unschedulablePods []*apiv1.Pod,
+-	nodes []*apiv1.Node,
+-	daemonSets []*appsv1.DaemonSet,
+-	nodeInfos map[string]*framework.NodeInfo,
+-	allOrNothing bool, // Either request enough capacity for all unschedulablePods, or don't request it at all.
++		unschedulablePods []*apiv1.Pod,
++		nodes []*apiv1.Node,
++		daemonSets []*appsv1.DaemonSet,
++		nodeInfos map[string]*framework.NodeInfo,
++		allOrNothing bool, // Either request enough capacity for all unschedulablePods, or don't request it at all.
+ ) (*status.ScaleUpStatus, errors.AutoscalerError) {
+ 	if !o.initialized {
+ 		return status.UpdateScaleUpError(&status.ScaleUpStatus{}, errors.NewAutoscalerError(errors.InternalError, "ScaleUpOrchestrator is not initialized"))
+@@ -121,9 +123,13 @@ func (o *ScaleUpOrchestrator) ScaleUp(
+ 	// Initialise binpacking limiter.
+ 	o.processors.BinpackingLimiter.InitBinpacking(o.autoscalingContext, nodeGroups)
+ 
+-	resourcesLeft, aErr := o.resourceManager.ResourcesLeft(o.autoscalingContext, nodeInfos, nodes)
+-	if aErr != nil {
+-		return status.UpdateScaleUpError(&status.ScaleUpStatus{}, aErr.AddPrefix("could not compute total resources: "))
++	resourcesLeft := make(map[string]map[string]int64)
++	for _, ng := range nodeGroups {
++		ngResourcesLeft, aErr := o.resourceManager.ResourcesLeftForNodeGroup(o.autoscalingContext, ng, nodes, nodeInfos)
++		if aErr != nil {
++			return status.UpdateScaleUpError(&status.ScaleUpStatus{}, aErr.AddPrefix("could not compute total resources: "))
++		}
++		resourcesLeft[ng.Id()] = ngResourcesLeft
+ 	}
+ 
+ 	now := time.Now()
+@@ -194,7 +200,7 @@ func (o *ScaleUpOrchestrator) ScaleUp(
+ 		return status.UpdateScaleUpError(&status.ScaleUpStatus{PodsTriggeredScaleUp: bestOption.Pods}, aErr)
+ 	}
+ 
+-	newNodes, aErr = o.applyLimits(newNodes, resourcesLeft, bestOption.NodeGroup, nodeInfos)
++	newNodes, aErr = o.applyLimits(newNodes, resourcesLeft[bestOption.NodeGroup.Id()], bestOption.NodeGroup, nodeInfos)
+ 	if aErr != nil {
+ 		return status.UpdateScaleUpError(
+ 			&status.ScaleUpStatus{PodsTriggeredScaleUp: bestOption.Pods},
+@@ -298,8 +304,8 @@ func (o *ScaleUpOrchestrator) applyLimits(newNodes int, resourcesLeft resource.L
+ // size is the TargetSize queried directly from cloud providers. Returns
+ // appropriate status or error if an unexpected error occurred.
+ func (o *ScaleUpOrchestrator) ScaleUpToNodeGroupMinSize(
+-	nodes []*apiv1.Node,
+-	nodeInfos map[string]*framework.NodeInfo,
++		nodes []*apiv1.Node,
++		nodeInfos map[string]*framework.NodeInfo,
+ ) (*status.ScaleUpStatus, errors.AutoscalerError) {
+ 	if !o.initialized {
+ 		return status.UpdateScaleUpError(&status.ScaleUpStatus{}, errors.NewAutoscalerError(errors.InternalError, "ScaleUpOrchestrator is not initialized"))
+@@ -309,16 +315,17 @@ func (o *ScaleUpOrchestrator) ScaleUpToNodeGroupMinSize(
+ 	nodeGroups := o.autoscalingContext.CloudProvider.NodeGroups()
+ 	scaleUpInfos := make([]nodegroupset.ScaleUpInfo, 0)
+ 
+-	resourcesLeft, aErr := o.resourceManager.ResourcesLeft(o.autoscalingContext, nodeInfos, nodes)
+-	if aErr != nil {
+-		return status.UpdateScaleUpError(&status.ScaleUpStatus{}, aErr.AddPrefix("could not compute total resources: "))
+-	}
+-
++	resourcesLeft := make(map[string]map[string]int64)
+ 	for _, ng := range nodeGroups {
+ 		if !ng.Exist() {
+ 			klog.Warningf("ScaleUpToNodeGroupMinSize: NodeGroup %s does not exist", ng.Id())
+ 			continue
+ 		}
++		ngResourcesLeft, aErr := o.resourceManager.ResourcesLeftForNodeGroup(o.autoscalingContext, ng, nodes, nodeInfos)
++		if aErr != nil {
++			return status.UpdateScaleUpError(&status.ScaleUpStatus{}, aErr.AddPrefix("could not compute total resources: "))
++		}
++		resourcesLeft[ng.Id()] = ngResourcesLeft
+ 
+ 		targetSize, err := ng.TargetSize()
+ 		if err != nil {
+@@ -342,13 +349,13 @@ func (o *ScaleUpOrchestrator) ScaleUpToNodeGroupMinSize(
+ 			continue
+ 		}
+ 
+-		if skipReason := o.IsNodeGroupResourceExceeded(resourcesLeft, ng, nodeInfo, 1); skipReason != nil {
++		if skipReason := o.IsNodeGroupResourceExceeded(resourcesLeft[ng.Id()], ng, nodeInfo, 1); skipReason != nil {
+ 			klog.Warningf("ScaleUpToNodeGroupMinSize: node group resource excceded: %v", skipReason)
+ 			continue
+ 		}
+ 
+ 		newNodeCount := ng.MinSize() - targetSize
+-		newNodeCount, err = o.resourceManager.ApplyLimits(o.autoscalingContext, newNodeCount, resourcesLeft, nodeInfo, ng)
++		newNodeCount, err = o.resourceManager.ApplyLimits(o.autoscalingContext, newNodeCount, resourcesLeft[ng.Id()], nodeInfo, ng)
+ 		if err != nil {
+ 			klog.Warningf("ScaleUpToNodeGroupMinSize: failed to apply resource limits: %v", err)
+ 			continue
+@@ -395,11 +402,11 @@ func (o *ScaleUpOrchestrator) ScaleUpToNodeGroupMinSize(
+ 
+ // filterValidScaleUpNodeGroups filters the node groups that are valid for scale-up
+ func (o *ScaleUpOrchestrator) filterValidScaleUpNodeGroups(
+-	nodeGroups []cloudprovider.NodeGroup,
+-	nodeInfos map[string]*framework.NodeInfo,
+-	resourcesLeft resource.Limits,
+-	currentNodeCount int,
+-	now time.Time,
++		nodeGroups []cloudprovider.NodeGroup,
++		nodeInfos map[string]*framework.NodeInfo,
++		resourcesLeft map[string]map[string]int64,
++		currentNodeCount int,
++		now time.Time,
+ ) ([]cloudprovider.NodeGroup, map[string]status.Reasons) {
+ 	var validNodeGroups []cloudprovider.NodeGroup
+ 	skippedNodeGroups := map[string]status.Reasons{}
+@@ -441,7 +448,7 @@ func (o *ScaleUpOrchestrator) filterValidScaleUpNodeGroups(
+ 			skippedNodeGroups[nodeGroup.Id()] = NotReadyReason
+ 			continue
+ 		}
+-		if skipReason := o.IsNodeGroupResourceExceeded(resourcesLeft, nodeGroup, nodeInfo, numNodes); skipReason != nil {
++		if skipReason := o.IsNodeGroupResourceExceeded(resourcesLeft[nodeGroup.Id()], nodeGroup, nodeInfo, numNodes); skipReason != nil {
+ 			skippedNodeGroups[nodeGroup.Id()] = skipReason
+ 			continue
+ 		}
+@@ -453,12 +460,12 @@ func (o *ScaleUpOrchestrator) filterValidScaleUpNodeGroups(
+ 
+ // ComputeExpansionOption computes expansion option based on pending pods and cluster state.
+ func (o *ScaleUpOrchestrator) ComputeExpansionOption(
+-	nodeGroup cloudprovider.NodeGroup,
+-	schedulablePodGroups map[string][]estimator.PodEquivalenceGroup,
+-	nodeInfos map[string]*framework.NodeInfo,
+-	currentNodeCount int,
+-	now time.Time,
+-	allOrNothing bool,
++		nodeGroup cloudprovider.NodeGroup,
++		schedulablePodGroups map[string][]estimator.PodEquivalenceGroup,
++		nodeInfos map[string]*framework.NodeInfo,
++		currentNodeCount int,
++		now time.Time,
++		allOrNothing bool,
+ ) expander.Option {
+ 	option := expander.Option{NodeGroup: nodeGroup}
+ 	podGroups := schedulablePodGroups[nodeGroup.Id()]
+@@ -514,11 +521,11 @@ func (o *ScaleUpOrchestrator) ComputeExpansionOption(
+ 
+ // CreateNodeGroup will try to create a new node group based on the initialOption.
+ func (o *ScaleUpOrchestrator) CreateNodeGroup(
+-	initialOption *expander.Option,
+-	nodeInfos map[string]*framework.NodeInfo,
+-	schedulablePodGroups map[string][]estimator.PodEquivalenceGroup,
+-	podEquivalenceGroups []*equivalence.PodGroup,
+-	daemonSets []*appsv1.DaemonSet,
++		initialOption *expander.Option,
++		nodeInfos map[string]*framework.NodeInfo,
++		schedulablePodGroups map[string][]estimator.PodEquivalenceGroup,
++		podEquivalenceGroups []*equivalence.PodGroup,
++		daemonSets []*appsv1.DaemonSet,
+ ) ([]nodegroups.CreateNodeGroupResult, *status.ScaleUpStatus, errors.AutoscalerError) {
+ 	oldId := initialOption.NodeGroup.Id()
+ 	res, aErr := o.processors.NodeGroupManager.CreateNodeGroup(o.autoscalingContext, initialOption.NodeGroup)
+@@ -527,12 +534,12 @@ func (o *ScaleUpOrchestrator) CreateNodeGroup(
+ 
+ // CreateNodeGroupAsync will try to create a new node group asynchronously based on the initialOption.
+ func (o *ScaleUpOrchestrator) CreateNodeGroupAsync(
+-	initialOption *expander.Option,
+-	nodeInfos map[string]*framework.NodeInfo,
+-	schedulablePodGroups map[string][]estimator.PodEquivalenceGroup,
+-	podEquivalenceGroups []*equivalence.PodGroup,
+-	daemonSets []*appsv1.DaemonSet,
+-	initializer nodegroups.AsyncNodeGroupInitializer,
++		initialOption *expander.Option,
++		nodeInfos map[string]*framework.NodeInfo,
++		schedulablePodGroups map[string][]estimator.PodEquivalenceGroup,
++		podEquivalenceGroups []*equivalence.PodGroup,
++		daemonSets []*appsv1.DaemonSet,
++		initializer nodegroups.AsyncNodeGroupInitializer,
+ ) ([]nodegroups.CreateNodeGroupResult, *status.ScaleUpStatus, errors.AutoscalerError) {
+ 	oldId := initialOption.NodeGroup.Id()
+ 	res, aErr := o.processors.NodeGroupManager.CreateNodeGroupAsync(o.autoscalingContext, initialOption.NodeGroup, initializer)
+@@ -540,14 +547,14 @@ func (o *ScaleUpOrchestrator) CreateNodeGroupAsync(
+ }
+ 
+ func (o *ScaleUpOrchestrator) processCreateNodeGroupResult(
+-	initialOption *expander.Option,
+-	initialOptionId string,
+-	nodeInfos map[string]*framework.NodeInfo,
+-	schedulablePodGroups map[string][]estimator.PodEquivalenceGroup,
+-	podEquivalenceGroups []*equivalence.PodGroup,
+-	daemonSets []*appsv1.DaemonSet,
+-	result nodegroups.CreateNodeGroupResult,
+-	aErr errors.AutoscalerError,
++		initialOption *expander.Option,
++		initialOptionId string,
++		nodeInfos map[string]*framework.NodeInfo,
++		schedulablePodGroups map[string][]estimator.PodEquivalenceGroup,
++		podEquivalenceGroups []*equivalence.PodGroup,
++		daemonSets []*appsv1.DaemonSet,
++		result nodegroups.CreateNodeGroupResult,
++		aErr errors.AutoscalerError,
+ ) ([]nodegroups.CreateNodeGroupResult, *status.ScaleUpStatus, errors.AutoscalerError) {
+ 	if aErr != nil {
+ 		status, err := status.UpdateScaleUpError(
+@@ -594,9 +601,9 @@ func (o *ScaleUpOrchestrator) processCreateNodeGroupResult(
+ // SchedulablePodGroups returns a list of pods that could be scheduled
+ // in a given node group after a scale up.
+ func (o *ScaleUpOrchestrator) SchedulablePodGroups(
+-	podEquivalenceGroups []*equivalence.PodGroup,
+-	nodeGroup cloudprovider.NodeGroup,
+-	nodeInfo *framework.NodeInfo,
++		podEquivalenceGroups []*equivalence.PodGroup,
++		nodeGroup cloudprovider.NodeGroup,
++		nodeInfo *framework.NodeInfo,
+ ) []estimator.PodEquivalenceGroup {
+ 	o.autoscalingContext.ClusterSnapshot.Fork()
+ 	defer o.autoscalingContext.ClusterSnapshot.Revert()
+@@ -707,11 +714,11 @@ func (o *ScaleUpOrchestrator) GetCappedNewNodeCount(newNodeCount, currentNodeCou
+ }
+ 
+ func (o *ScaleUpOrchestrator) balanceScaleUps(
+-	now time.Time,
+-	nodeGroup cloudprovider.NodeGroup,
+-	newNodes int,
+-	nodeInfos map[string]*framework.NodeInfo,
+-	schedulablePodGroups map[string][]estimator.PodEquivalenceGroup,
++		now time.Time,
++		nodeGroup cloudprovider.NodeGroup,
++		newNodes int,
++		nodeInfos map[string]*framework.NodeInfo,
++		schedulablePodGroups map[string][]estimator.PodEquivalenceGroup,
+ ) ([]nodegroupset.ScaleUpInfo, errors.AutoscalerError) {
+ 	// Recompute similar node groups in case they need to be updated
+ 	similarNodeGroups := o.ComputeSimilarNodeGroups(nodeGroup, nodeInfos, schedulablePodGroups, now)
+@@ -746,10 +753,10 @@ func (o *ScaleUpOrchestrator) balanceScaleUps(
+ // ComputeSimilarNodeGroups finds similar node groups which can schedule the same
+ // set of pods as the main node group.
+ func (o *ScaleUpOrchestrator) ComputeSimilarNodeGroups(
+-	nodeGroup cloudprovider.NodeGroup,
+-	nodeInfos map[string]*framework.NodeInfo,
+-	schedulablePodGroups map[string][]estimator.PodEquivalenceGroup,
+-	now time.Time,
++		nodeGroup cloudprovider.NodeGroup,
++		nodeInfos map[string]*framework.NodeInfo,
++		schedulablePodGroups map[string][]estimator.PodEquivalenceGroup,
++		now time.Time,
+ ) []cloudprovider.NodeGroup {
+ 	if !o.autoscalingContext.BalanceSimilarNodeGroups {
+ 		return nil
+diff --git a/cluster-autoscaler/core/scaleup/resource/manager.go b/cluster-autoscaler/core/scaleup/resource/manager.go
+index 542d3d2f2..5b2a75c9a 100644
+--- a/cluster-autoscaler/core/scaleup/resource/manager.go
++++ b/cluster-autoscaler/core/scaleup/resource/manager.go
+@@ -26,6 +26,7 @@ import (
+ 	"k8s.io/autoscaler/cluster-autoscaler/context"
+ 	"k8s.io/autoscaler/cluster-autoscaler/core/utils"
+ 	"k8s.io/autoscaler/cluster-autoscaler/processors/customresources"
++	"k8s.io/autoscaler/cluster-autoscaler/resourcelimits"
+ 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
+ 	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
+ 	"k8s.io/klog/v2"
+@@ -181,7 +182,7 @@ func (m *Manager) ApplyLimits(ctx *context.AutoscalingContext, newCount int, res
+ }
+ 
+ // CheckDeltaWithinLimits compares the resource limit and resource delta, and returns the limit check result.
+-func CheckDeltaWithinLimits(left Limits, delta Delta) LimitsCheckResult {
++func CheckDeltaWithinLimits(left Limits, delta resourcelimits.Delta) LimitsCheckResult {
+ 	exceededResources := sets.NewString()
+ 	for resource, resourceDelta := range delta {
+ 		resourceLeft, found := left[resource]
+diff --git a/cluster-autoscaler/core/scaleup/scaleup.go b/cluster-autoscaler/core/scaleup/scaleup.go
+index 21a0ef6b8..f0973021c 100644
+--- a/cluster-autoscaler/core/scaleup/scaleup.go
++++ b/cluster-autoscaler/core/scaleup/scaleup.go
+@@ -24,6 +24,7 @@ import (
+ 	"k8s.io/autoscaler/cluster-autoscaler/estimator"
+ 	ca_processors "k8s.io/autoscaler/cluster-autoscaler/processors"
+ 	"k8s.io/autoscaler/cluster-autoscaler/processors/status"
++	"k8s.io/autoscaler/cluster-autoscaler/resourcelimits"
+ 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
+ 	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
+ 	"k8s.io/autoscaler/cluster-autoscaler/utils/taints"
+@@ -34,28 +35,29 @@ import (
+ type Orchestrator interface {
+ 	// Initialize initializes the orchestrator object with required fields.
+ 	Initialize(
+-		autoscalingContext *context.AutoscalingContext,
+-		processors *ca_processors.AutoscalingProcessors,
+-		clusterStateRegistry *clusterstate.ClusterStateRegistry,
+-		estimatorBuilder estimator.EstimatorBuilder,
+-		taintConfig taints.TaintConfig,
++			autoscalingContext *context.AutoscalingContext,
++			processors *ca_processors.AutoscalingProcessors,
++			clusterStateRegistry *clusterstate.ClusterStateRegistry,
++			estimatorBuilder estimator.EstimatorBuilder,
++			taintConfig taints.TaintConfig,
++			limitsProviders []resourcelimits.Provider,
+ 	)
+ 	// ScaleUp tries to scale the cluster up. Returns appropriate status or error if
+ 	// an unexpected error occurred. Assumes that all nodes in the cluster are ready
+ 	// and in sync with instance groups.
+ 	ScaleUp(
+-		unschedulablePods []*apiv1.Pod,
+-		nodes []*apiv1.Node,
+-		daemonSets []*appsv1.DaemonSet,
+-		nodeInfos map[string]*framework.NodeInfo,
+-		allOrNothing bool,
++			unschedulablePods []*apiv1.Pod,
++			nodes []*apiv1.Node,
++			daemonSets []*appsv1.DaemonSet,
++			nodeInfos map[string]*framework.NodeInfo,
++			allOrNothing bool,
+ 	) (*status.ScaleUpStatus, errors.AutoscalerError)
+ 	// ScaleUpToNodeGroupMinSize tries to scale up node groups that have less nodes
+ 	// than the configured min size. The source of truth for the current node group
+ 	// size is the TargetSize queried directly from cloud providers. Returns
+ 	// appropriate status or error if an unexpected error occurred.
+ 	ScaleUpToNodeGroupMinSize(
+-		nodes []*apiv1.Node,
+-		nodeInfos map[string]*framework.NodeInfo,
++			nodes []*apiv1.Node,
++			nodeInfos map[string]*framework.NodeInfo,
+ 	) (*status.ScaleUpStatus, errors.AutoscalerError)
+ }
+diff --git a/cluster-autoscaler/core/static_autoscaler.go b/cluster-autoscaler/core/static_autoscaler.go
+index d84e70e71..620e30c37 100644
+--- a/cluster-autoscaler/core/static_autoscaler.go
++++ b/cluster-autoscaler/core/static_autoscaler.go
+@@ -43,6 +43,7 @@ import (
+ 	"k8s.io/autoscaler/cluster-autoscaler/observers/loopstart"
+ 	ca_processors "k8s.io/autoscaler/cluster-autoscaler/processors"
+ 	"k8s.io/autoscaler/cluster-autoscaler/processors/status"
++	"k8s.io/autoscaler/cluster-autoscaler/resourcelimits"
+ 	"k8s.io/autoscaler/cluster-autoscaler/simulator"
+ 	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot"
+ 	"k8s.io/autoscaler/cluster-autoscaler/simulator/drainability/rules"
+@@ -131,22 +132,23 @@ func (callbacks *staticAutoscalerProcessorCallbacks) reset() {
+ 
+ // NewStaticAutoscaler creates an instance of Autoscaler filled with provided parameters
+ func NewStaticAutoscaler(
+-	opts config.AutoscalingOptions,
+-	fwHandle *framework.Handle,
+-	clusterSnapshot clustersnapshot.ClusterSnapshot,
+-	autoscalingKubeClients *context.AutoscalingKubeClients,
+-	processors *ca_processors.AutoscalingProcessors,
+-	loopStartNotifier *loopstart.ObserversList,
+-	cloudProvider cloudprovider.CloudProvider,
+-	expanderStrategy expander.Strategy,
+-	estimatorBuilder estimator.EstimatorBuilder,
+-	backoff backoff.Backoff,
+-	debuggingSnapshotter debuggingsnapshot.DebuggingSnapshotter,
+-	remainingPdbTracker pdb.RemainingPdbTracker,
+-	scaleUpOrchestrator scaleup.Orchestrator,
+-	deleteOptions options.NodeDeleteOptions,
+-	drainabilityRules rules.Rules,
+-	draProvider *draprovider.Provider) *StaticAutoscaler {
++		opts config.AutoscalingOptions,
++		fwHandle *framework.Handle,
++		clusterSnapshot clustersnapshot.ClusterSnapshot,
++		autoscalingKubeClients *context.AutoscalingKubeClients,
++		processors *ca_processors.AutoscalingProcessors,
++		loopStartNotifier *loopstart.ObserversList,
++		cloudProvider cloudprovider.CloudProvider,
++		expanderStrategy expander.Strategy,
++		estimatorBuilder estimator.EstimatorBuilder,
++		backoff backoff.Backoff,
++		debuggingSnapshotter debuggingsnapshot.DebuggingSnapshotter,
++		remainingPdbTracker pdb.RemainingPdbTracker,
++		scaleUpOrchestrator scaleup.Orchestrator,
++		deleteOptions options.NodeDeleteOptions,
++		drainabilityRules rules.Rules,
++		draProvider *draprovider.Provider,
++		limitsProviders []resourcelimits.Provider) *StaticAutoscaler {
+ 
+ 	klog.V(4).Infof("Creating new static autoscaler with opts: %v", opts)
+ 
+@@ -185,7 +187,7 @@ func NewStaticAutoscaler(
+ 	if scaleUpOrchestrator == nil {
+ 		scaleUpOrchestrator = orchestrator.New()
+ 	}
+-	scaleUpOrchestrator.Initialize(autoscalingContext, processors, clusterStateRegistry, estimatorBuilder, taintConfig)
++	scaleUpOrchestrator.Initialize(autoscalingContext, processors, clusterStateRegistry, estimatorBuilder, taintConfig, limitsProviders)
+ 
+ 	// Set the initial scale times to be less than the start time so as to
+ 	// not start in cooldown mode.
+@@ -609,7 +611,7 @@ func (a *StaticAutoscaler) RunOnce(currentTime time.Time) caerrors.AutoscalerErr
+ 
+ 		scaleDownInCooldown := a.isScaleDownInCooldown(currentTime)
+ 		klog.V(4).Infof("Scale down status: lastScaleUpTime=%s lastScaleDownDeleteTime=%v "+
+-			"lastScaleDownFailTime=%s scaleDownForbidden=%v scaleDownInCooldown=%v",
++				"lastScaleDownFailTime=%s scaleDownForbidden=%v scaleDownInCooldown=%v",
+ 			a.lastScaleUpTime, a.lastScaleDownDeleteTime, a.lastScaleDownFailTime,
+ 			a.processorCallbacks.disableScaleDownForLoop, scaleDownInCooldown)
+ 		metrics.UpdateScaleDownInCooldown(scaleDownInCooldown)
+@@ -725,9 +727,9 @@ func (a *StaticAutoscaler) isScaleDownInCooldown(currentTime time.Time) bool {
+ 		return scaleDownInCooldown
+ 	}
+ 	return scaleDownInCooldown ||
+-		a.lastScaleUpTime.Add(a.ScaleDownDelayAfterAdd).After(currentTime) ||
+-		a.lastScaleDownFailTime.Add(a.ScaleDownDelayAfterFailure).After(currentTime) ||
+-		a.lastScaleDownDeleteTime.Add(a.ScaleDownDelayAfterDelete).After(currentTime)
++			a.lastScaleUpTime.Add(a.ScaleDownDelayAfterAdd).After(currentTime) ||
++			a.lastScaleDownFailTime.Add(a.ScaleDownDelayAfterFailure).After(currentTime) ||
++			a.lastScaleDownDeleteTime.Add(a.ScaleDownDelayAfterDelete).After(currentTime)
+ }
+ 
+ // Sets the target size of node groups to the current number of nodes in them
+@@ -764,7 +766,7 @@ func fixNodeGroupSize(context *context.AutoscalingContext, clusterStateRegistry
+ // removeOldUnregisteredNodes removes unregistered nodes if needed. Returns true
+ // if anything was removed and error if such occurred.
+ func (a *StaticAutoscaler) removeOldUnregisteredNodes(allUnregisteredNodes []clusterstate.UnregisteredNode,
+-	csr *clusterstate.ClusterStateRegistry, currentTime time.Time, logRecorder *utils.LogEventRecorder) (bool, error) {
++		csr *clusterstate.ClusterStateRegistry, currentTime time.Time, logRecorder *utils.LogEventRecorder) (bool, error) {
+ 
+ 	unregisteredNodesToRemove, err := a.oldUnregisteredNodes(allUnregisteredNodes, csr, currentTime)
+ 	if err != nil {
+diff --git a/cluster-autoscaler/provisioningrequest/besteffortatomic/provisioning_class.go b/cluster-autoscaler/provisioningrequest/besteffortatomic/provisioning_class.go
+index 2d743bfca..cb9877e88 100644
+--- a/cluster-autoscaler/provisioningrequest/besteffortatomic/provisioning_class.go
++++ b/cluster-autoscaler/provisioningrequest/besteffortatomic/provisioning_class.go
+@@ -21,6 +21,7 @@ import (
+ 	apiv1 "k8s.io/api/core/v1"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/types"
++	"k8s.io/autoscaler/cluster-autoscaler/resourcelimits"
+ 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
+ 	"k8s.io/klog/v2"
+ 
+@@ -53,30 +54,23 @@ type bestEffortAtomicProvClass struct {
+ 
+ // New creates best effort atomic provisioning class supporting create capacity scale-up mode.
+ func New(
+-	client *provreqclient.ProvisioningRequestClient,
++		client *provreqclient.ProvisioningRequestClient,
+ ) *bestEffortAtomicProvClass {
+ 	return &bestEffortAtomicProvClass{client: client, scaleUpOrchestrator: orchestrator.New()}
+ }
+ 
+-func (o *bestEffortAtomicProvClass) Initialize(
+-	autoscalingContext *context.AutoscalingContext,
+-	processors *ca_processors.AutoscalingProcessors,
+-	clusterStateRegistry *clusterstate.ClusterStateRegistry,
+-	estimatorBuilder estimator.EstimatorBuilder,
+-	taintConfig taints.TaintConfig,
+-	injector *scheduling.HintingSimulator,
+-) {
++func (o *bestEffortAtomicProvClass) Initialize(autoscalingContext *context.AutoscalingContext, processors *ca_processors.AutoscalingProcessors, clusterStateRegistry *clusterstate.ClusterStateRegistry, estimatorBuilder estimator.EstimatorBuilder, taintConfig taints.TaintConfig, injector *scheduling.HintingSimulator, limitsProviders []resourcelimits.Provider) {
+ 	o.context = autoscalingContext
+ 	o.injector = injector
+-	o.scaleUpOrchestrator.Initialize(autoscalingContext, processors, clusterStateRegistry, estimatorBuilder, taintConfig)
++	o.scaleUpOrchestrator.Initialize(autoscalingContext, processors, clusterStateRegistry, estimatorBuilder, taintConfig, limitsProviders)
+ }
+ 
+ // Provision returns success if there is, or has just been requested, sufficient capacity in the cluster for pods from ProvisioningRequest.
+ func (o *bestEffortAtomicProvClass) Provision(
+-	unschedulablePods []*apiv1.Pod,
+-	nodes []*apiv1.Node,
+-	daemonSets []*appsv1.DaemonSet,
+-	nodeInfos map[string]*framework.NodeInfo,
++		unschedulablePods []*apiv1.Pod,
++		nodes []*apiv1.Node,
++		daemonSets []*appsv1.DaemonSet,
++		nodeInfos map[string]*framework.NodeInfo,
+ ) (*status.ScaleUpStatus, errors.AutoscalerError) {
+ 	if len(unschedulablePods) == 0 {
+ 		return &status.ScaleUpStatus{Result: status.ScaleUpNotTried}, nil
+diff --git a/cluster-autoscaler/provisioningrequest/checkcapacity/provisioningclass.go b/cluster-autoscaler/provisioningrequest/checkcapacity/provisioningclass.go
+index b89dd40f0..687ac463c 100644
+--- a/cluster-autoscaler/provisioningrequest/checkcapacity/provisioningclass.go
++++ b/cluster-autoscaler/provisioningrequest/checkcapacity/provisioningclass.go
+@@ -35,6 +35,7 @@ import (
+ 	"k8s.io/autoscaler/cluster-autoscaler/provisioningrequest/conditions"
+ 	"k8s.io/autoscaler/cluster-autoscaler/provisioningrequest/provreqclient"
+ 	"k8s.io/autoscaler/cluster-autoscaler/provisioningrequest/provreqwrapper"
++	"k8s.io/autoscaler/cluster-autoscaler/resourcelimits"
+ 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
+ 	"k8s.io/autoscaler/cluster-autoscaler/simulator/scheduling"
+ 	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
+@@ -63,20 +64,13 @@ type checkCapacityProvClass struct {
+ 
+ // New create check-capacity scale-up mode.
+ func New(
+-	client *provreqclient.ProvisioningRequestClient,
+-	provreqInjector *provreq.ProvisioningRequestPodsInjector,
++		client *provreqclient.ProvisioningRequestClient,
++		provreqInjector *provreq.ProvisioningRequestPodsInjector,
+ ) *checkCapacityProvClass {
+ 	return &checkCapacityProvClass{client: client, provreqInjector: provreqInjector}
+ }
+ 
+-func (o *checkCapacityProvClass) Initialize(
+-	autoscalingContext *context.AutoscalingContext,
+-	processors *ca_processors.AutoscalingProcessors,
+-	clusterStateRegistry *clusterstate.ClusterStateRegistry,
+-	estimatorBuilder estimator.EstimatorBuilder,
+-	taintConfig taints.TaintConfig,
+-	schedulingSimulator *scheduling.HintingSimulator,
+-) {
++func (o *checkCapacityProvClass) Initialize(autoscalingContext *context.AutoscalingContext, processors *ca_processors.AutoscalingProcessors, clusterStateRegistry *clusterstate.ClusterStateRegistry, estimatorBuilder estimator.EstimatorBuilder, taintConfig taints.TaintConfig, schedulingSimulator *scheduling.HintingSimulator, limitsProviders []resourcelimits.Provider) {
+ 	o.context = autoscalingContext
+ 	o.schedulingSimulator = schedulingSimulator
+ 	if autoscalingContext.CheckCapacityBatchProcessing {
+@@ -89,10 +83,10 @@ func (o *checkCapacityProvClass) Initialize(
+ 
+ // Provision return if there is capacity in the cluster for pods from ProvisioningRequest.
+ func (o *checkCapacityProvClass) Provision(
+-	unschedulablePods []*apiv1.Pod,
+-	nodes []*apiv1.Node,
+-	daemonSets []*appsv1.DaemonSet,
+-	nodeInfos map[string]*framework.NodeInfo,
++		unschedulablePods []*apiv1.Pod,
++		nodes []*apiv1.Node,
++		daemonSets []*appsv1.DaemonSet,
++		nodeInfos map[string]*framework.NodeInfo,
+ ) (*status.ScaleUpStatus, errors.AutoscalerError) {
+ 	combinedStatus := NewCombinedStatusSet()
+ 	startTime := time.Now()
+diff --git a/cluster-autoscaler/provisioningrequest/orchestrator/orchestrator.go b/cluster-autoscaler/provisioningrequest/orchestrator/orchestrator.go
+index 6174749c4..0d0ea9bde 100644
+--- a/cluster-autoscaler/provisioningrequest/orchestrator/orchestrator.go
++++ b/cluster-autoscaler/provisioningrequest/orchestrator/orchestrator.go
+@@ -26,6 +26,7 @@ import (
+ 	"k8s.io/autoscaler/cluster-autoscaler/estimator"
+ 	"k8s.io/autoscaler/cluster-autoscaler/processors/status"
+ 	"k8s.io/autoscaler/cluster-autoscaler/provisioningrequest/provreqclient"
++	"k8s.io/autoscaler/cluster-autoscaler/resourcelimits"
+ 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
+ 	"k8s.io/autoscaler/cluster-autoscaler/simulator/scheduling"
+ 	ca_errors "k8s.io/autoscaler/cluster-autoscaler/utils/errors"
+@@ -37,9 +38,8 @@ import (
+ // ProvisioningClass is an interface for ProvisioningRequests.
+ type ProvisioningClass interface {
+ 	Provision([]*apiv1.Pod, []*apiv1.Node, []*appsv1.DaemonSet,
+-		map[string]*framework.NodeInfo) (*status.ScaleUpStatus, ca_errors.AutoscalerError)
+-	Initialize(*context.AutoscalingContext, *ca_processors.AutoscalingProcessors, *clusterstate.ClusterStateRegistry,
+-		estimator.EstimatorBuilder, taints.TaintConfig, *scheduling.HintingSimulator)
++			map[string]*framework.NodeInfo) (*status.ScaleUpStatus, ca_errors.AutoscalerError)
++	Initialize(*context.AutoscalingContext, *ca_processors.AutoscalingProcessors, *clusterstate.ClusterStateRegistry, estimator.EstimatorBuilder, taints.TaintConfig, *scheduling.HintingSimulator, []resourcelimits.Provider)
+ }
+ 
+ // provReqOrchestrator is an orchestrator that contains orchestrators for all supported Provisioning Classes.
+@@ -60,18 +60,12 @@ func New(client *provreqclient.ProvisioningRequestClient, classes []Provisioning
+ }
+ 
+ // Initialize initialize orchestrator.
+-func (o *provReqOrchestrator) Initialize(
+-	autoscalingContext *context.AutoscalingContext,
+-	processors *ca_processors.AutoscalingProcessors,
+-	clusterStateRegistry *clusterstate.ClusterStateRegistry,
+-	estimatorBuilder estimator.EstimatorBuilder,
+-	taintConfig taints.TaintConfig,
+-) {
++func (o *provReqOrchestrator) Initialize(autoscalingContext *context.AutoscalingContext, processors *ca_processors.AutoscalingProcessors, clusterStateRegistry *clusterstate.ClusterStateRegistry, estimatorBuilder estimator.EstimatorBuilder, taintConfig taints.TaintConfig, limitsProviders []resourcelimits.Provider, ) {
+ 	o.initialized = true
+ 	o.context = autoscalingContext
+ 	o.injector = scheduling.NewHintingSimulator()
+ 	for _, mode := range o.provisioningClasses {
+-		mode.Initialize(autoscalingContext, processors, clusterStateRegistry, estimatorBuilder, taintConfig, o.injector)
++		mode.Initialize(autoscalingContext, processors, clusterStateRegistry, estimatorBuilder, taintConfig, o.injector, limitsProviders)
+ 	}
+ }
+ 
+@@ -79,11 +73,11 @@ func (o *provReqOrchestrator) Initialize(
+ // so only one ProvisioningClass return non empty scaleUp result.
+ // In case we implement multiple ProvisioningRequest ScaleUp, the function should return combined status
+ func (o *provReqOrchestrator) ScaleUp(
+-	unschedulablePods []*apiv1.Pod,
+-	nodes []*apiv1.Node,
+-	daemonSets []*appsv1.DaemonSet,
+-	nodeInfos map[string]*framework.NodeInfo,
+-	_ bool, // Provision() doesn't use this parameter.
++		unschedulablePods []*apiv1.Pod,
++		nodes []*apiv1.Node,
++		daemonSets []*appsv1.DaemonSet,
++		nodeInfos map[string]*framework.NodeInfo,
++		_ bool, // Provision() doesn't use this parameter.
+ ) (*status.ScaleUpStatus, ca_errors.AutoscalerError) {
+ 	if !o.initialized {
+ 		return &status.ScaleUpStatus{}, ca_errors.ToAutoscalerError(ca_errors.InternalError, fmt.Errorf("provisioningrequest.Orchestrator is not initialized"))
+@@ -104,8 +98,8 @@ func (o *provReqOrchestrator) ScaleUp(
+ 
+ // ScaleUpToNodeGroupMinSize doesn't have implementation for ProvisioningRequest Orchestrator.
+ func (o *provReqOrchestrator) ScaleUpToNodeGroupMinSize(
+-	nodes []*apiv1.Node,
+-	nodeInfos map[string]*framework.NodeInfo,
++		nodes []*apiv1.Node,
++		nodeInfos map[string]*framework.NodeInfo,
+ ) (*status.ScaleUpStatus, ca_errors.AutoscalerError) {
+ 	return nil, nil
+ }
+diff --git a/cluster-autoscaler/provisioningrequest/orchestrator/wrapper_orchestrator.go b/cluster-autoscaler/provisioningrequest/orchestrator/wrapper_orchestrator.go
+index 81798ad19..6f8ef6af6 100644
+--- a/cluster-autoscaler/provisioningrequest/orchestrator/wrapper_orchestrator.go
++++ b/cluster-autoscaler/provisioningrequest/orchestrator/wrapper_orchestrator.go
+@@ -27,6 +27,7 @@ import (
+ 	"k8s.io/autoscaler/cluster-autoscaler/estimator"
+ 	ca_processors "k8s.io/autoscaler/cluster-autoscaler/processors"
+ 	"k8s.io/autoscaler/cluster-autoscaler/processors/status"
++	"k8s.io/autoscaler/cluster-autoscaler/resourcelimits"
+ 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
+ 	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
+ 	"k8s.io/autoscaler/cluster-autoscaler/utils/taints"
+@@ -51,24 +52,25 @@ func NewWrapperOrchestrator(provReqOrchestrator scaleup.Orchestrator) *WrapperOr
+ 
+ // Initialize initializes the orchestrator object with required fields.
+ func (o *WrapperOrchestrator) Initialize(
+-	autoscalingContext *context.AutoscalingContext,
+-	processors *ca_processors.AutoscalingProcessors,
+-	clusterStateRegistry *clusterstate.ClusterStateRegistry,
+-	estimatorBuilder estimator.EstimatorBuilder,
+-	taintConfig taints.TaintConfig,
++		autoscalingContext *context.AutoscalingContext,
++		processors *ca_processors.AutoscalingProcessors,
++		clusterStateRegistry *clusterstate.ClusterStateRegistry,
++		estimatorBuilder estimator.EstimatorBuilder,
++		taintConfig taints.TaintConfig,
++		limitsProviders []resourcelimits.Provider,
+ ) {
+ 	o.autoscalingContext = autoscalingContext
+-	o.podsOrchestrator.Initialize(autoscalingContext, processors, clusterStateRegistry, estimatorBuilder, taintConfig)
+-	o.provReqOrchestrator.Initialize(autoscalingContext, processors, clusterStateRegistry, estimatorBuilder, taintConfig)
++	o.podsOrchestrator.Initialize(autoscalingContext, processors, clusterStateRegistry, estimatorBuilder, taintConfig, limitsProviders)
++	o.provReqOrchestrator.Initialize(autoscalingContext, processors, clusterStateRegistry, estimatorBuilder, taintConfig, limitsProviders)
+ }
+ 
+ // ScaleUp run scaleUp function for regular pods of pods from ProvisioningRequest.
+ func (o *WrapperOrchestrator) ScaleUp(
+-	unschedulablePods []*apiv1.Pod,
+-	nodes []*apiv1.Node,
+-	daemonSets []*appsv1.DaemonSet,
+-	nodeInfos map[string]*framework.NodeInfo,
+-	allOrNothing bool,
++		unschedulablePods []*apiv1.Pod,
++		nodes []*apiv1.Node,
++		daemonSets []*appsv1.DaemonSet,
++		nodeInfos map[string]*framework.NodeInfo,
++		allOrNothing bool,
+ ) (*status.ScaleUpStatus, errors.AutoscalerError) {
+ 	defer func() {
+ 		o.autoscalingContext.ProvisioningRequestScaleUpMode = !o.autoscalingContext.ProvisioningRequestScaleUpMode
+@@ -103,8 +105,8 @@ func splitOut(unschedulablePods []*apiv1.Pod) (provReqPods, regularPods []*apiv1
+ // size is the TargetSize queried directly from cloud providers. Returns
+ // appropriate status or error if an unexpected error occurred.
+ func (o *WrapperOrchestrator) ScaleUpToNodeGroupMinSize(
+-	nodes []*apiv1.Node,
+-	nodeInfos map[string]*framework.NodeInfo,
++		nodes []*apiv1.Node,
++		nodeInfos map[string]*framework.NodeInfo,
+ ) (*status.ScaleUpStatus, errors.AutoscalerError) {
+ 	return o.podsOrchestrator.ScaleUpToNodeGroupMinSize(nodes, nodeInfos)
+ }
+diff --git a/cluster-autoscaler/resourcelimits/manager.go b/cluster-autoscaler/resourcelimits/manager.go
+new file mode 100644
+index 000000000..fcefa38a2
+--- /dev/null
++++ b/cluster-autoscaler/resourcelimits/manager.go
+@@ -0,0 +1,193 @@
++package resourcelimits
++
++import (
++	corev1 "k8s.io/api/core/v1"
++	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
++	"k8s.io/autoscaler/cluster-autoscaler/context"
++	"k8s.io/autoscaler/cluster-autoscaler/core/utils"
++	"k8s.io/autoscaler/cluster-autoscaler/processors/customresources"
++	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
++	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
++)
++
++type Manager struct {
++	crp            customresources.CustomResourcesProcessor
++	limitProviders []Provider
++}
++
++//type LimitProvider interface {
++//	LimitsForNode(nodeInfo *framework.NodeInfo) (*LimitsUsage, error)
++//}
++
++// Delta is a map: the key is resource type and the value is resource delta.
++type Delta map[string]int64
++
++type Limiter interface {
++	MatchesNode(node *corev1.Node) bool
++	MaxLimits() map[string]int64
++	MinLimits() map[string]int64
++}
++
++type ClusterWideLimiter struct {
++	minLimits map[string]int64
++	maxLimits map[string]int64
++}
++
++func (c *ClusterWideLimiter) MatchesNode(nodeInfo *framework.NodeInfo) bool {
++	return true
++}
++
++func (c *ClusterWideLimiter) MaxLimits() map[string]int64 {
++	return c.maxLimits
++}
++
++func (c *ClusterWideLimiter) MinLimits() map[string]int64 {
++	return c.minLimits
++}
++
++func (m *Manager) ResourcesLeftForNodeGroup(ctx *context.AutoscalingContext, nodeGroup cloudprovider.NodeGroup, nodes []*corev1.Node, nodeInfos map[string]*framework.NodeInfo) (map[string]int64, errors.AutoscalerError) {
++	nodeInfo, err := nodeGroup.TemplateNodeInfo()
++	if err != nil {
++		return nil, errors.ToAutoscalerError(errors.CloudProviderError, err)
++	}
++	delta, aErr := m.DeltaForNode(ctx, nodeInfo, nodeGroup)
++	if aErr != nil {
++		return nil, aErr
++	}
++	var matchingLimiters []Limiter
++	for _, provider := range m.limitProviders {
++		limiters, err := provider.ResourceLimitersForNode(nodeInfo.Node())
++		if err != nil {
++			return nil, errors.ToAutoscalerError(errors.CloudProviderError, err)
++		}
++		matchingLimiters = append(matchingLimiters, limiters...)
++	}
++
++	nodesFromNotAutoscaledGroups, aErr := utils.FilterOutNodesFromNotAutoscaledGroups(nodes, ctx.CloudProvider)
++	if aErr != nil {
++		return nil, aErr.AddPrefix("failed to filter out nodes which are from not autoscaled groups: ")
++	}
++	usages := make([]map[string]int64, len(matchingLimiters))
++	for _, ng := range ctx.CloudProvider.NodeGroups() {
++		nodeInfo, found := nodeInfos[ng.Id()]
++		if !found {
++			return nil, errors.NewAutoscalerErrorf(errors.CloudProviderError, "No node info for: %s", ng.Id())
++		}
++		currentSize, err := ng.TargetSize()
++		if err != nil {
++			return nil, errors.ToAutoscalerError(errors.CloudProviderError, err).AddPrefix("failed to get node group size of %v: ", ng.Id())
++		}
++		nodeCPU, nodeMemory := utils.GetNodeCoresAndMemory(nodeInfo.Node())
++		resourceTargets, err := m.crp.GetNodeResourceTargets(ctx, nodeInfo.Node(), ng)
++		if err != nil {
++			return nil, errors.ToAutoscalerError(errors.CloudProviderError, err).AddPrefix("failed to get custom resource target for node group %v: ", ng.Id())
++		}
++
++		for i, rl := range matchingLimiters {
++			if rl.MatchesNode(nodeInfo.Node()) {
++				if usages[i] == nil {
++					usages[i] = make(map[string]int64)
++				}
++
++				usages[i][cloudprovider.ResourceNameCores] += int64(currentSize) * nodeCPU
++				usages[i][cloudprovider.ResourceNameMemory] += int64(currentSize) * nodeMemory
++
++				for _, resourceTarget := range resourceTargets {
++					if resourceTarget.ResourceType == "" || resourceTarget.ResourceCount == 0 {
++						continue
++					}
++					usages[i][resourceTarget.ResourceType] += resourceTarget.ResourceCount * int64(currentSize)
++				}
++			}
++		}
++	}
++	for _, node := range nodesFromNotAutoscaledGroups {
++		cores, memory := utils.GetNodeCoresAndMemory(node)
++		resourceTargets, err := m.crp.GetNodeResourceTargets(ctx, node, nil)
++		if err != nil {
++			return nil, errors.ToAutoscalerError(errors.CloudProviderError, err).AddPrefix("failed to get custom resource target for node %v: ", node.Name)
++		}
++		for i, rl := range matchingLimiters {
++			if rl.MatchesNode(nodeInfo.Node()) {
++				if usages[i] == nil {
++					usages[i] = make(map[string]int64)
++				}
++				usages[i][cloudprovider.ResourceNameCores] += cores
++				usages[i][cloudprovider.ResourceNameMemory] += memory
++				for _, resourceTarget := range resourceTargets {
++					if resourceTarget.ResourceType == "" || resourceTarget.ResourceCount == 0 {
++						continue
++					}
++					usages[i][resourceTarget.ResourceType] += resourceTarget.ResourceCount
++				}
++			}
++		}
++	}
++
++	limits := make(map[string]int64)
++	// get resources left for NodeGroup
++	for i, rl := range matchingLimiters {
++		for resource, resourceDelta := range delta {
++			max := rl.MaxLimits()[resource]
++			if max > 0 {
++				if usages[i][resource]+resourceDelta > max {
++					limits[resource] = 0
++				} else {
++					limits[resource] = max - usages[i][resource]
++				}
++			}
++		}
++	}
++	return limits, nil
++}
++
++// DeltaForNode calculates the amount of resources that will be used from the cluster when creating a node.
++func (m *Manager) DeltaForNode(ctx *context.AutoscalingContext, nodeInfo *framework.NodeInfo, nodeGroup cloudprovider.NodeGroup) (Delta, errors.AutoscalerError) {
++	resultScaleUpDelta := make(Delta)
++	nodeCPU, nodeMemory := utils.GetNodeCoresAndMemory(nodeInfo.Node())
++	resultScaleUpDelta[cloudprovider.ResourceNameCores] = nodeCPU
++	resultScaleUpDelta[cloudprovider.ResourceNameMemory] = nodeMemory
++
++	resourceLimiter, err := ctx.CloudProvider.GetResourceLimiter()
++	if err != nil {
++		return nil, errors.ToAutoscalerError(errors.CloudProviderError, err)
++	}
++
++	if cloudprovider.ContainsCustomResources(resourceLimiter.GetResources()) {
++		resourceTargets, err := m.crp.GetNodeResourceTargets(ctx, nodeInfo.Node(), nodeGroup)
++		if err != nil {
++			return Delta{}, errors.ToAutoscalerError(errors.CloudProviderError, err).AddPrefix("failed to get target custom resources for node group %v: ", nodeGroup.Id())
++		}
++
++		for _, resourceTarget := range resourceTargets {
++			resultScaleUpDelta[resourceTarget.ResourceType] = resourceTarget.ResourceCount
++		}
++	}
++
++	return resultScaleUpDelta, nil
++}
++
++func (m *Manager) ApplyLimits(ctx *context.AutoscalingContext, newNodes int, resourcesLeft map[string]int64, nodeInfo *framework.NodeInfo, nodeGroup cloudprovider.NodeGroup) (int, errors.AutoscalerError) {
++	delta, aErr := m.DeltaForNode(ctx, nodeInfo, nodeGroup)
++	if aErr != nil {
++		return 0, aErr
++	}
++
++	for resource, resourceLeft := range resourcesLeft {
++		if resourceLeft == 0 {
++			return 0, nil
++		}
++		if delta[resource] == 0 {
++			continue
++		}
++		newNodes = min(newNodes, int(resourceLeft/delta[resource]))
++	}
++	return newNodes, nil
++}
++
++func NewResourceManager(crp customresources.CustomResourcesProcessor, limitProviders []Provider) *Manager {
++	return &Manager{
++		crp:            crp,
++		limitProviders: limitProviders,
++	}
++}
+diff --git a/cluster-autoscaler/resourcelimits/provider.go b/cluster-autoscaler/resourcelimits/provider.go
+new file mode 100644
+index 000000000..8dea0cd85
+--- /dev/null
++++ b/cluster-autoscaler/resourcelimits/provider.go
+@@ -0,0 +1,27 @@
++package resourcelimits
++
++import (
++	apiv1 "k8s.io/api/core/v1"
++	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
++)
++
++type Provider interface {
++	ResourceLimitersForNode(node *apiv1.Node) ([]Limiter, error)
++}
++type CloudLimitersProvider struct {
++	cloudProvider cloudprovider.CloudProvider
++}
++
++func (p *CloudLimitersProvider) ResourceLimitersForNode(node *apiv1.Node) ([]Limiter, error) {
++	rl, err := p.cloudProvider.GetResourceLimiter()
++	if err != nil {
++		return nil, err
++	}
++	return []Limiter{rl}, nil
++}
++
++func NewCloudLimitersProvider(cloudProvider cloudprovider.CloudProvider) *CloudLimitersProvider {
++	return &CloudLimitersProvider{
++		cloudProvider: cloudProvider,
++	}
++}

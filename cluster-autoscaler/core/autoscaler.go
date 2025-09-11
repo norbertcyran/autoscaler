@@ -32,6 +32,7 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/expander/factory"
 	"k8s.io/autoscaler/cluster-autoscaler/observers/loopstart"
 	ca_processors "k8s.io/autoscaler/cluster-autoscaler/processors"
+	"k8s.io/autoscaler/cluster-autoscaler/resourcelimits"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot/predicate"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot/store"
@@ -65,6 +66,7 @@ type AutoscalerOptions struct {
 	DeleteOptions          options.NodeDeleteOptions
 	DrainabilityRules      rules.Rules
 	DraProvider            *draprovider.Provider
+	LimitsProviders        []resourcelimits.Provider
 }
 
 // Autoscaler is the main component of CA which scales up/down node groups according to its configuration
@@ -105,6 +107,7 @@ func NewAutoscaler(opts AutoscalerOptions, informerFactory informers.SharedInfor
 		opts.DeleteOptions,
 		opts.DrainabilityRules,
 		opts.DraProvider,
+		opts.LimitsProviders,
 	), nil
 }
 
@@ -170,6 +173,9 @@ func initializeDefaultOptions(opts *AutoscalerOptions, informerFactory informers
 	}
 	if opts.DraProvider == nil && opts.DynamicResourceAllocationEnabled {
 		opts.DraProvider = draprovider.NewProviderFromInformers(informerFactory)
+	}
+	if opts.LimitsProviders == nil {
+		opts.LimitsProviders = []resourcelimits.Provider{resourcelimits.NewCloudLimitersProvider(opts.CloudProvider)}
 	}
 
 	return nil

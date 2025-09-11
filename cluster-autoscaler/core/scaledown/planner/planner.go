@@ -25,6 +25,7 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 	"k8s.io/autoscaler/cluster-autoscaler/context"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown"
+	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/actuation"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/eligibility"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/pdb"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/resource"
@@ -32,6 +33,7 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/unremovable"
 	"k8s.io/autoscaler/cluster-autoscaler/processors"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/nodes"
+	"k8s.io/autoscaler/cluster-autoscaler/resourcelimits"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/drainability/rules"
@@ -73,18 +75,20 @@ type Planner struct {
 	eligibilityChecker    eligibilityChecker
 	nodeUtilizationMap    map[string]utilization.Info
 	resourceLimitsFinder  *resource.LimitsFinder
+	resourceManager       *resourcelimits.Manager
 	cc                    controllerReplicasCalculator
 	scaleDownSetProcessor nodes.ScaleDownSetProcessor
 	scaleDownContext      *nodes.ScaleDownContext
 }
 
 // New creates a new Planner object.
-func New(context *context.AutoscalingContext, processors *processors.AutoscalingProcessors, deleteOptions options.NodeDeleteOptions, drainabilityRules rules.Rules) *Planner {
+func New(context *context.AutoscalingContext, processors *processors.AutoscalingProcessors, deleteOptions options.NodeDeleteOptions, drainabilityRules rules.Rules, limitsProviders []resourcelimits.Provider) *Planner {
 	resourceLimitsFinder := resource.NewLimitsFinder(processors.CustomResourcesProcessor)
 	minUpdateInterval := context.AutoscalingOptions.NodeGroupDefaults.ScaleDownUnneededTime
 	if minUpdateInterval == 0*time.Nanosecond {
 		minUpdateInterval = 1 * time.Nanosecond
 	}
+	resourceManager := resourcelimits.NewResourceManager(processors.CustomResourcesProcessor, limitsProviders)
 	return &Planner{
 		context:               context,
 		unremovableNodes:      unremovable.NewNodes(),
@@ -94,9 +98,10 @@ func New(context *context.AutoscalingContext, processors *processors.Autoscaling
 		eligibilityChecker:    eligibility.NewChecker(processors.NodeGroupConfigProcessor),
 		nodeUtilizationMap:    make(map[string]utilization.Info),
 		resourceLimitsFinder:  resourceLimitsFinder,
+		resourceManager:       resourceManager,
 		cc:                    newControllerReplicasCalculator(context.ListerRegistry),
 		scaleDownSetProcessor: processors.ScaleDownSetProcessor,
-		scaleDownContext:      nodes.NewDefaultScaleDownContext(),
+		scaleDownContext:      nodes.NewDefaultScaleDownContext(resourceManager),
 		minUpdateInterval:     minUpdateInterval,
 	}
 }
@@ -137,7 +142,7 @@ func (p *Planner) CleanUpUnneededNodes() {
 // to the Planner.
 func (p *Planner) NodesToDelete(_ time.Time) (empty, needDrain []*apiv1.Node) {
 	empty, needDrain = []*apiv1.Node{}, []*apiv1.Node{}
-	nodes, err := allNodes(p.context.ClusterSnapshot)
+	nodes, err := readyNodes(p.context.ClusterSnapshot, p.latestUpdate)
 	if err != nil {
 		klog.Errorf("Nothing will scale down, failed to list nodes from ClusterSnapshot: %v", err)
 		return nil, nil
@@ -145,6 +150,10 @@ func (p *Planner) NodesToDelete(_ time.Time) (empty, needDrain []*apiv1.Node) {
 	resourceLimiter, err := p.context.CloudProvider.GetResourceLimiter()
 	if err != nil {
 		klog.Errorf("Nothing will scale down, failed to create resource limiter: %v", err)
+		return nil, nil
+	}
+	if err := p.resourceManager.RecalculateUsages(p.context, nodes); err != nil {
+		klog.Errorf("Nothing will scale down, failed to recalculate usages: %v", err)
 		return nil, nil
 	}
 	p.scaleDownContext.ResourcesLeft = p.resourceLimitsFinder.LimitsLeft(p.context, nodes, resourceLimiter, p.latestUpdate).DeepCopy()
@@ -175,15 +184,21 @@ func (p *Planner) addUnremovableNodes(unremovableNodes []simulator.UnremovableNo
 	}
 }
 
-func allNodes(s clustersnapshot.ClusterSnapshot) ([]*apiv1.Node, error) {
+func readyNodes(s clustersnapshot.ClusterSnapshot, timestamp time.Time) ([]*apiv1.Node, error) {
 	nodeInfos, err := s.ListNodeInfos()
 	if err != nil {
 		// This should never happen, List() returns err only because scheduler interface requires it.
 		return nil, err
 	}
-	nodes := make([]*apiv1.Node, len(nodeInfos))
-	for i, ni := range nodeInfos {
-		nodes[i] = ni.Node()
+	nodes := make([]*apiv1.Node, 0, len(nodeInfos))
+	for _, ni := range nodeInfos {
+		node := ni.Node()
+		if actuation.IsNodeBeingDeleted(node, timestamp) {
+			// Nodes being deleted do not count towards total cluster resources
+			continue
+		}
+		// TODO - filter out upcoming nodes too
+		nodes = append(nodes, node)
 	}
 	return nodes, nil
 }

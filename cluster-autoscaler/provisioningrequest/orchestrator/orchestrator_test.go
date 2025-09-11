@@ -521,7 +521,7 @@ func setupTest(t *testing.T, client *provreqclient.ProvisioningRequestClient, no
 		provisioningClasses: []ProvisioningClass{checkcapacity.New(client, injector), besteffortatomic.New(client)},
 	}
 
-	orchestrator.Initialize(&autoscalingContext, processors, clusterState, estimatorBuilder, taints.TaintConfig{})
+	orchestrator.Initialize(&autoscalingContext, processors, clusterState, estimatorBuilder, taints.TaintConfig{}, nil)
 	return orchestrator, nodeInfos
 }
 

@@ -1,0 +1,84 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.14.0
+  name: autoscalinglimitranges.autoscaling.x-k8s.io
+spec:
+  group: autoscaling.x-k8s.io
+  names:
+    kind: AutoscalingLimitRange
+    listKind: AutoscalingLimitRangeList
+    plural: autoscalinglimitranges
+    singular: autoscalinglimitrange
+  scope: Namespaced
+  versions:
+  - name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: AutoscalingLimitRange is the Schema for the autoscalinglimitranges
+          API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: AutoscalingLimitRangeSpec defines the desired state of AutoscalingLimitRange
+            properties:
+              limits:
+                description: Limits are the limits that are enforced.
+                properties:
+                  max:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: Max usage constraints on this kind by resource name.
+                    type: object
+                  min:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: Min usage constraints on this kind by resource name.
+                    type: object
+                type: object
+              scopeSelector:
+                additionalProperties:
+                  type: string
+                description: ScopeSelector is the map of labels defining the scope
+                  the limits apply to. Usage will be calculated from the nodes matching
+                  that selector.
+                type: object
+            required:
+            - limits
+            - scopeSelector
+            type: object
+          status:
+            description: AutoscalingLimitRangeStatus defines the observed state of
+              AutoscalingLimitRange
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

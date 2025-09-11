@@ -46,6 +46,7 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/processors/nodeinfosprovider"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/status"
 	processorstest "k8s.io/autoscaler/cluster-autoscaler/processors/test"
+	"k8s.io/autoscaler/cluster-autoscaler/resourcelimits"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
 	kube_util "k8s.io/autoscaler/cluster-autoscaler/utils/kubernetes"
@@ -1057,7 +1058,7 @@ func runSimpleScaleUpTest(t *testing.T, config *ScaleUpTestConfig) *ScaleUpTestR
 		processors.NodeGroupManager = &MockAutoprovisioningNodeGroupManager{T: t, ExtraGroups: 0}
 	}
 	orchestrator := New()
-	orchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{})
+	orchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{}, nil)
 	expander := NewMockReportingStrategy(t, config.ExpansionOptionToChoose, nil)
 	context.ExpanderStrategy = expander
 
@@ -1162,7 +1163,7 @@ func TestScaleUpUnhealthy(t *testing.T) {
 
 	processors := processorstest.NewTestProcessors(&context)
 	suOrchestrator := New()
-	suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{})
+	suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{}, nil)
 	scaleUpStatus, err := suOrchestrator.ScaleUp([]*apiv1.Pod{p3}, nodes, []*appsv1.DaemonSet{}, nodeInfos, false)
 
 	assert.NoError(t, err)
@@ -1213,7 +1214,7 @@ func TestBinpackingLimiter(t *testing.T) {
 	processors.BinpackingLimiter = &MockBinpackingLimiter{}
 
 	suOrchestrator := New()
-	suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{})
+	suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{}, nil)
 
 	expander := NewMockReportingStrategy(t, nil, nil)
 	context.ExpanderStrategy = expander
@@ -1265,7 +1266,7 @@ func TestScaleUpNoHelp(t *testing.T) {
 
 	processors := processorstest.NewTestProcessors(&context)
 	suOrchestrator := New()
-	suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{})
+	suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{}, nil)
 	scaleUpStatus, err := suOrchestrator.ScaleUp([]*apiv1.Pod{p3}, nodes, []*appsv1.DaemonSet{}, nodeInfos, false)
 	processors.ScaleUpStatusProcessor.Process(&context, scaleUpStatus)
 
@@ -1418,7 +1419,7 @@ func TestComputeSimilarNodeGroups(t *testing.T) {
 			assert.NoError(t, clusterState.UpdateNodes(nodes, nodeInfos, time.Now()))
 
 			suOrchestrator := &ScaleUpOrchestrator{}
-			suOrchestrator.Initialize(&ctx, &processors.AutoscalingProcessors{NodeGroupSetProcessor: nodeGroupSetProcessor}, clusterState, newEstimatorBuilder(), taints.TaintConfig{})
+			suOrchestrator.Initialize(&ctx, &processors.AutoscalingProcessors{NodeGroupSetProcessor: nodeGroupSetProcessor}, clusterState, newEstimatorBuilder(), taints.TaintConfig{}, nil)
 			similarNodeGroups := suOrchestrator.ComputeSimilarNodeGroups(provider.GetNodeGroup(tc.nodeGroup), nodeInfos, tc.schedulablePodGroups, now)
 
 			var gotSimilarNodeGroups []string
@@ -1511,7 +1512,7 @@ func TestScaleUpBalanceGroups(t *testing.T) {
 			}
 			processors := processorstest.NewTestProcessors(&context)
 			suOrchestrator := New()
-			suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{})
+			suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{}, nil)
 			scaleUpStatus, typedErr := suOrchestrator.ScaleUp(pods, nodes, []*appsv1.DaemonSet{}, nodeInfos, false)
 
 			assert.NoError(t, typedErr)
@@ -1571,7 +1572,7 @@ func TestScaleUpAutoprovisionedNodeGroup(t *testing.T) {
 	nodeInfos, _ := nodeinfosprovider.NewDefaultTemplateNodeInfoProvider(nil, false).Process(&context, nodes, []*appsv1.DaemonSet{}, taints.TaintConfig{}, time.Now())
 
 	suOrchestrator := New()
-	suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{})
+	suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{}, nil)
 	scaleUpStatus, err := suOrchestrator.ScaleUp([]*apiv1.Pod{p1}, nodes, []*appsv1.DaemonSet{}, nodeInfos, false)
 	assert.NoError(t, err)
 	assert.True(t, scaleUpStatus.WasSuccessful())
@@ -1622,7 +1623,7 @@ func TestScaleUpBalanceAutoprovisionedNodeGroups(t *testing.T) {
 	nodeInfos, _ := nodeinfosprovider.NewDefaultTemplateNodeInfoProvider(nil, false).Process(&context, nodes, []*appsv1.DaemonSet{}, taints.TaintConfig{}, time.Now())
 
 	suOrchestrator := New()
-	suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{})
+	suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{}, nil)
 	scaleUpStatus, err := suOrchestrator.ScaleUp([]*apiv1.Pod{p1, p2, p3}, nodes, []*appsv1.DaemonSet{}, nodeInfos, false)
 	assert.NoError(t, err)
 	assert.True(t, scaleUpStatus.WasSuccessful())
@@ -1679,7 +1680,7 @@ func TestScaleUpToMeetNodeGroupMinSize(t *testing.T) {
 	clusterState.UpdateNodes(nodes, nodeInfos, time.Now())
 
 	suOrchestrator := New()
-	suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{})
+	suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{}, nil)
 	scaleUpStatus, err := suOrchestrator.ScaleUpToNodeGroupMinSize(nodes, nodeInfos)
 	assert.NoError(t, err)
 	assert.True(t, scaleUpStatus.WasSuccessful())
@@ -1771,7 +1772,7 @@ func TestScaleupAsyncNodeGroupsEnabled(t *testing.T) {
 		nodeInfos, _ := nodeinfosprovider.NewDefaultTemplateNodeInfoProvider(nil, false).Process(&context, nodes, []*appsv1.DaemonSet{}, taints.TaintConfig{}, time.Now())
 
 		suOrchestrator := New()
-		suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{})
+		suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{}, nil)
 		scaleUpStatus, err := suOrchestrator.ScaleUp(tc.podsToAdd, nodes, []*appsv1.DaemonSet{}, nodeInfos, false)
 		assert.NoError(t, err)
 		assert.True(t, scaleUpStatus.WasSuccessful())
@@ -1840,7 +1841,7 @@ func TestCheckDeltaWithinLimits(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		checkResult := resource.CheckDeltaWithinLimits(test.limits, test.delta)
+		checkResult := resource.CheckDeltaWithinLimits(test.limits, resourcelimits.Delta(test.delta))
 		if len(test.exceededResources) == 0 {
 			assert.Equal(t, resource.LimitsNotExceeded(), checkResult)
 		} else {

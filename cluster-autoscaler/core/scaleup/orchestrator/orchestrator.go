@@ -26,7 +26,6 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/clusterstate"
 	"k8s.io/autoscaler/cluster-autoscaler/context"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaleup/equivalence"
-	"k8s.io/autoscaler/cluster-autoscaler/core/scaleup/resource"
 	"k8s.io/autoscaler/cluster-autoscaler/estimator"
 	"k8s.io/autoscaler/cluster-autoscaler/expander"
 	"k8s.io/autoscaler/cluster-autoscaler/metrics"
@@ -34,6 +33,7 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/processors/nodegroups"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/nodegroupset"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/status"
+	"k8s.io/autoscaler/cluster-autoscaler/resourcelimits"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
@@ -46,7 +46,7 @@ import (
 type ScaleUpOrchestrator struct {
 	autoscalingContext   *context.AutoscalingContext
 	processors           *ca_processors.AutoscalingProcessors
-	resourceManager      *resource.Manager
+	resourceManager      *resourcelimits.Manager
 	clusterStateRegistry *clusterstate.ClusterStateRegistry
 	scaleUpExecutor      *scaleUpExecutor
 	estimatorBuilder     estimator.EstimatorBuilder
@@ -68,13 +68,14 @@ func (o *ScaleUpOrchestrator) Initialize(
 	clusterStateRegistry *clusterstate.ClusterStateRegistry,
 	estimatorBuilder estimator.EstimatorBuilder,
 	taintConfig taints.TaintConfig,
+	limitsProviders []resourcelimits.Provider,
 ) {
 	o.autoscalingContext = autoscalingContext
 	o.processors = processors
 	o.clusterStateRegistry = clusterStateRegistry
 	o.estimatorBuilder = estimatorBuilder
 	o.taintConfig = taintConfig
-	o.resourceManager = resource.NewManager(processors.CustomResourcesProcessor)
+	o.resourceManager = resourcelimits.NewResourceManager(processors.CustomResourcesProcessor, limitsProviders)
 	o.scaleUpExecutor = newScaleUpExecutor(autoscalingContext, processors.ScaleStateNotifier, o.processors.AsyncNodeGroupStateChecker)
 	o.initialized = true
 }
@@ -121,15 +122,15 @@ func (o *ScaleUpOrchestrator) ScaleUp(
 	// Initialise binpacking limiter.
 	o.processors.BinpackingLimiter.InitBinpacking(o.autoscalingContext, nodeGroups)
 
-	resourcesLeft, aErr := o.resourceManager.ResourcesLeft(o.autoscalingContext, nodeInfos, nodes)
-	if aErr != nil {
-		return status.UpdateScaleUpError(&status.ScaleUpStatus{}, aErr.AddPrefix("could not compute total resources: "))
+	err := o.recalculateUsages()
+	if err != nil {
+		return status.UpdateScaleUpError(&status.ScaleUpStatus{}, errors.ToAutoscalerError(errors.InternalError, err))
 	}
 
 	now := time.Now()
 
 	// Filter out invalid node groups
-	validNodeGroups, skippedNodeGroups := o.filterValidScaleUpNodeGroups(nodeGroups, nodeInfos, resourcesLeft, len(nodes)+len(upcomingNodes), now)
+	validNodeGroups, skippedNodeGroups := o.filterValidScaleUpNodeGroups(nodeGroups, nodeInfos, len(nodes)+len(upcomingNodes), now)
 
 	// Mark skipped node groups as processed.
 	for nodegroupID := range skippedNodeGroups {
@@ -194,7 +195,7 @@ func (o *ScaleUpOrchestrator) ScaleUp(
 		return status.UpdateScaleUpError(&status.ScaleUpStatus{PodsTriggeredScaleUp: bestOption.Pods}, aErr)
 	}
 
-	newNodes, aErr = o.applyLimits(newNodes, resourcesLeft, bestOption.NodeGroup, nodeInfos)
+	newNodes, aErr = o.applyLimits(newNodes, bestOption.NodeGroup)
 	if aErr != nil {
 		return status.UpdateScaleUpError(
 			&status.ScaleUpStatus{PodsTriggeredScaleUp: bestOption.Pods},
@@ -283,14 +284,12 @@ func (o *ScaleUpOrchestrator) ScaleUp(
 	}, nil
 }
 
-func (o *ScaleUpOrchestrator) applyLimits(newNodes int, resourcesLeft resource.Limits, nodeGroup cloudprovider.NodeGroup, nodeInfos map[string]*framework.NodeInfo) (int, errors.AutoscalerError) {
-	nodeInfo, found := nodeInfos[nodeGroup.Id()]
-	if !found {
-		// This should never happen, as we already should have retrieved nodeInfo for any considered nodegroup.
-		klog.Errorf("No node info for: %s", nodeGroup.Id())
-		return 0, errors.NewAutoscalerError(errors.CloudProviderError, "No node info for best expansion option!")
+func (o *ScaleUpOrchestrator) applyLimits(newNodes int, nodeGroup cloudprovider.NodeGroup) (int, errors.AutoscalerError) {
+	checkResult, err := o.resourceManager.CheckNodeDelta(o.autoscalingContext, nodeGroup, newNodes)
+	if err != nil {
+		return 0, errors.ToAutoscalerError(errors.InternalError, err)
 	}
-	return o.resourceManager.ApplyLimits(o.autoscalingContext, newNodes, resourcesLeft, nodeInfo, nodeGroup)
+	return checkResult.AllowedDelta, nil
 }
 
 // ScaleUpToNodeGroupMinSize tries to scale up node groups that have less nodes
@@ -309,11 +308,9 @@ func (o *ScaleUpOrchestrator) ScaleUpToNodeGroupMinSize(
 	nodeGroups := o.autoscalingContext.CloudProvider.NodeGroups()
 	scaleUpInfos := make([]nodegroupset.ScaleUpInfo, 0)
 
-	resourcesLeft, aErr := o.resourceManager.ResourcesLeft(o.autoscalingContext, nodeInfos, nodes)
-	if aErr != nil {
-		return status.UpdateScaleUpError(&status.ScaleUpStatus{}, aErr.AddPrefix("could not compute total resources: "))
+	if err := o.recalculateUsages(); err != nil {
+		return status.UpdateScaleUpError(&status.ScaleUpStatus{}, errors.ToAutoscalerError(errors.InternalError, err))
 	}
-
 	for _, ng := range nodeGroups {
 		if !ng.Exist() {
 			klog.Warningf("ScaleUpToNodeGroupMinSize: NodeGroup %s does not exist", ng.Id())
@@ -336,21 +333,14 @@ func (o *ScaleUpOrchestrator) ScaleUpToNodeGroupMinSize(
 			continue
 		}
 
-		nodeInfo, found := nodeInfos[ng.Id()]
-		if !found {
-			klog.Warningf("ScaleUpToNodeGroupMinSize: no node info for %s", ng.Id())
-			continue
-		}
-
-		if skipReason := o.IsNodeGroupResourceExceeded(resourcesLeft, ng, nodeInfo, 1); skipReason != nil {
-			klog.Warningf("ScaleUpToNodeGroupMinSize: node group resource excceded: %v", skipReason)
-			continue
-		}
-
 		newNodeCount := ng.MinSize() - targetSize
-		newNodeCount, err = o.resourceManager.ApplyLimits(o.autoscalingContext, newNodeCount, resourcesLeft, nodeInfo, ng)
+		checkResult, err := o.resourceManager.CheckNodeDelta(o.autoscalingContext, ng, newNodeCount)
 		if err != nil {
-			klog.Warningf("ScaleUpToNodeGroupMinSize: failed to apply resource limits: %v", err)
+			return status.UpdateScaleUpError(&status.ScaleUpStatus{}, errors.ToAutoscalerError(errors.InternalError, err))
+		}
+		newNodeCount = checkResult.AllowedDelta
+		if newNodeCount == 0 {
+			klog.Warningf("ScaleUpToNodeGroupMinSize: node group resource excceded: %v", NewMaxResourceLimitReached(checkResult.ExceededResources))
 			continue
 		}
 
@@ -397,7 +387,6 @@ func (o *ScaleUpOrchestrator) ScaleUpToNodeGroupMinSize(
 func (o *ScaleUpOrchestrator) filterValidScaleUpNodeGroups(
 	nodeGroups []cloudprovider.NodeGroup,
 	nodeInfos map[string]*framework.NodeInfo,
-	resourcesLeft resource.Limits,
 	currentNodeCount int,
 	now time.Time,
 ) ([]cloudprovider.NodeGroup, map[string]status.Reasons) {
@@ -435,13 +424,7 @@ func (o *ScaleUpOrchestrator) filterValidScaleUpNodeGroups(
 			}
 		}
 
-		nodeInfo, found := nodeInfos[nodeGroup.Id()]
-		if !found {
-			klog.Errorf("No node info for: %s", nodeGroup.Id())
-			skippedNodeGroups[nodeGroup.Id()] = NotReadyReason
-			continue
-		}
-		if skipReason := o.IsNodeGroupResourceExceeded(resourcesLeft, nodeGroup, nodeInfo, numNodes); skipReason != nil {
+		if skipReason := o.IsNodeGroupResourceExceeded(nodeGroup, numNodes); skipReason != nil {
 			skippedNodeGroups[nodeGroup.Id()] = skipReason
 			continue
 		}
@@ -664,19 +647,13 @@ func (o *ScaleUpOrchestrator) IsNodeGroupReadyToScaleUp(nodeGroup cloudprovider.
 }
 
 // IsNodeGroupResourceExceeded returns nil if node group resource limits are not exceeded, otherwise a reason is provided.
-func (o *ScaleUpOrchestrator) IsNodeGroupResourceExceeded(resourcesLeft resource.Limits, nodeGroup cloudprovider.NodeGroup, nodeInfo *framework.NodeInfo, numNodes int) status.Reasons {
-	resourcesDelta, err := o.resourceManager.DeltaForNode(o.autoscalingContext, nodeInfo, nodeGroup)
+func (o *ScaleUpOrchestrator) IsNodeGroupResourceExceeded(nodeGroup cloudprovider.NodeGroup, numNodes int) status.Reasons {
+	checkResult, err := o.resourceManager.CheckNodeDelta(o.autoscalingContext, nodeGroup, numNodes)
 	if err != nil {
 		klog.Errorf("Skipping node group %s; error getting node group resources: %v", nodeGroup.Id(), err)
 		return NotReadyReason
 	}
-
-	for resource, delta := range resourcesDelta {
-		resourcesDelta[resource] = delta * int64(numNodes)
-	}
-
-	checkResult := resource.CheckDeltaWithinLimits(resourcesLeft, resourcesDelta)
-	if checkResult.Exceeded {
+	if checkResult.Exceeded() {
 		klog.V(4).Infof("Skipping node group %s; maximal limit exceeded for %v", nodeGroup.Id(), checkResult.ExceededResources)
 		for _, resource := range checkResult.ExceededResources {
 			switch resource {
@@ -785,6 +762,19 @@ func (o *ScaleUpOrchestrator) ComputeSimilarNodeGroups(
 	}
 
 	return validSimilarNodeGroups
+}
+
+func (o *ScaleUpOrchestrator) recalculateUsages() error {
+
+	var nodes []*apiv1.Node
+	nodeInfos, err := o.autoscalingContext.ClusterSnapshot.ListNodeInfos()
+	if err != nil {
+		return err
+	}
+	for _, nodeInfo := range nodeInfos {
+		nodes = append(nodes, nodeInfo.Node())
+	}
+	return o.resourceManager.RecalculateUsages(o.autoscalingContext, nodes)
 }
 
 func matchingSchedulablePodGroups(podGroups []estimator.PodEquivalenceGroup, similarPodGroups []estimator.PodEquivalenceGroup) bool {

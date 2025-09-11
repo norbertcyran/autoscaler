@@ -31,6 +31,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"k8s.io/autoscaler/cluster-autoscaler/resourcelimits"
 
 	appsv1 "k8s.io/api/apps/v1"
 	apiv1 "k8s.io/api/core/v1"
@@ -311,7 +312,7 @@ func setupAutoscaler(config *autoscalerSetupConfig) (*StaticAutoscaler, error) {
 	processors.ScaleStateNotifier.Register(clusterState)
 
 	suOrchestrator := orchestrator.New()
-	suOrchestrator.Initialize(&ctx, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{})
+	suOrchestrator.Initialize(&ctx, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{}, nil)
 
 	deleteOptions := options.NewNodeDeleteOptions(ctx.AutoscalingOptions)
 	drainabilityRules := rules.Default(deleteOptions)
@@ -321,7 +322,8 @@ func setupAutoscaler(config *autoscalerSetupConfig) (*StaticAutoscaler, error) {
 		nodeDeletionTracker = deletiontracker.NewNodeDeletionTracker(0 * time.Second)
 	}
 	ctx.ScaleDownActuator = actuation.NewActuator(&ctx, clusterState, nodeDeletionTracker, deleteOptions, drainabilityRules, processors.NodeGroupConfigProcessor)
-	sdPlanner := planner.New(&ctx, processors, deleteOptions, drainabilityRules)
+	limitsProviders := []resourcelimits.Provider{resourcelimits.NewCloudLimitersProvider(provider)}
+	sdPlanner := planner.New(&ctx, processors, deleteOptions, drainabilityRules, limitsProviders)
 
 	processorCallbacks.scaleDownPlanner = sdPlanner
 
@@ -411,7 +413,7 @@ func TestStaticAutoscalerRunOnce(t *testing.T) {
 	clusterState := clusterstate.NewClusterStateRegistry(provider, clusterStateConfig, context.LogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(options.NodeGroupDefaults), processors.AsyncNodeGroupStateChecker)
 	sdPlanner, sdActuator := newScaleDownPlannerAndActuator(&context, processors, clusterState, nil)
 	suOrchestrator := orchestrator.New()
-	suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{})
+	suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{}, nil)
 
 	autoscaler := &StaticAutoscaler{
 		AutoscalingContext:    &context,
@@ -679,7 +681,7 @@ func TestStaticAutoscalerRunOnceWithScaleDownDelayPerNG(t *testing.T) {
 
 			sdPlanner, sdActuator := newScaleDownPlannerAndActuator(&context, processors, clusterState, nil)
 			suOrchestrator := orchestrator.New()
-			suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{})
+			suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{}, nil)
 
 			autoscaler := &StaticAutoscaler{
 				AutoscalingContext:    &context,
@@ -823,7 +825,7 @@ func TestStaticAutoscalerRunOnceWithAutoprovisionedEnabled(t *testing.T) {
 
 	sdPlanner, sdActuator := newScaleDownPlannerAndActuator(&context, processors, clusterState, nil)
 	suOrchestrator := orchestrator.New()
-	suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{})
+	suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{}, nil)
 
 	autoscaler := &StaticAutoscaler{
 		AutoscalingContext:    &context,
@@ -976,7 +978,7 @@ func TestStaticAutoscalerRunOnceWithALongUnregisteredNode(t *testing.T) {
 
 			sdPlanner, sdActuator := newScaleDownPlannerAndActuator(&context, processors, clusterState, nil)
 			suOrchestrator := orchestrator.New()
-			suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{})
+			suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{}, nil)
 
 			autoscaler := &StaticAutoscaler{
 				AutoscalingContext:    &context,
@@ -1131,7 +1133,7 @@ func TestStaticAutoscalerRunOncePodsWithPriorities(t *testing.T) {
 	clusterState := clusterstate.NewClusterStateRegistry(provider, clusterStateConfig, context.LogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(options.NodeGroupDefaults), processors.AsyncNodeGroupStateChecker)
 	sdPlanner, sdActuator := newScaleDownPlannerAndActuator(&context, processors, clusterState, nil)
 	suOrchestrator := orchestrator.New()
-	suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{})
+	suOrchestrator.Initialize(&context, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{}, nil)
 
 	autoscaler := &StaticAutoscaler{
 		AutoscalingContext:    &context,
@@ -2936,7 +2938,8 @@ func newScaleDownPlannerAndActuator(ctx *context.AutoscalingContext, p *ca_proce
 	if nodeDeletionTracker == nil {
 		nodeDeletionTracker = deletiontracker.NewNodeDeletionTracker(0 * time.Second)
 	}
-	planner := planner.New(ctx, p, deleteOptions, nil)
+	limitsProviders := []resourcelimits.Provider{resourcelimits.NewCloudLimitersProvider(ctx.CloudProvider)}
+	planner := planner.New(ctx, p, deleteOptions, nil, limitsProviders)
 	actuator := actuation.NewActuator(ctx, cs, nodeDeletionTracker, deleteOptions, nil, p.NodeGroupConfigProcessor)
 	return planner, actuator
 }
@@ -3059,7 +3062,8 @@ func buildStaticAutoscaler(t *testing.T, provider cloudprovider.CloudProvider, a
 	deleteOptions := options.NewNodeDeleteOptions(ctx.AutoscalingOptions)
 	drainabilityRules := rules.Default(deleteOptions)
 
-	sdPlanner := planner.New(&ctx, processors, deleteOptions, drainabilityRules)
+	limitsProviders := []resourcelimits.Provider{resourcelimits.NewCloudLimitersProvider(ctx.CloudProvider)}
+	sdPlanner := planner.New(&ctx, processors, deleteOptions, drainabilityRules, limitsProviders)
 
 	autoscaler := &StaticAutoscaler{
 		AutoscalingContext:   &ctx,

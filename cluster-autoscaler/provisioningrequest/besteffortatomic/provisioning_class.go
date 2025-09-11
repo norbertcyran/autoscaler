@@ -21,6 +21,7 @@ import (
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/autoscaler/cluster-autoscaler/resourcelimits"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 	"k8s.io/klog/v2"
 
@@ -58,17 +59,10 @@ func New(
 	return &bestEffortAtomicProvClass{client: client, scaleUpOrchestrator: orchestrator.New()}
 }
 
-func (o *bestEffortAtomicProvClass) Initialize(
-	autoscalingContext *context.AutoscalingContext,
-	processors *ca_processors.AutoscalingProcessors,
-	clusterStateRegistry *clusterstate.ClusterStateRegistry,
-	estimatorBuilder estimator.EstimatorBuilder,
-	taintConfig taints.TaintConfig,
-	injector *scheduling.HintingSimulator,
-) {
+func (o *bestEffortAtomicProvClass) Initialize(autoscalingContext *context.AutoscalingContext, processors *ca_processors.AutoscalingProcessors, clusterStateRegistry *clusterstate.ClusterStateRegistry, estimatorBuilder estimator.EstimatorBuilder, taintConfig taints.TaintConfig, injector *scheduling.HintingSimulator, limitsProviders []resourcelimits.Provider) {
 	o.context = autoscalingContext
 	o.injector = injector
-	o.scaleUpOrchestrator.Initialize(autoscalingContext, processors, clusterStateRegistry, estimatorBuilder, taintConfig)
+	o.scaleUpOrchestrator.Initialize(autoscalingContext, processors, clusterStateRegistry, estimatorBuilder, taintConfig, limitsProviders)
 }
 
 // Provision returns success if there is, or has just been requested, sufficient capacity in the cluster for pods from ProvisioningRequest.

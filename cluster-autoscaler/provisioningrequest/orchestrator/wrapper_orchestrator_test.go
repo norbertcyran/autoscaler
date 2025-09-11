@@ -28,6 +28,7 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/estimator"
 	ca_processors "k8s.io/autoscaler/cluster-autoscaler/processors"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/status"
+	"k8s.io/autoscaler/cluster-autoscaler/resourcelimits"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/taints"
@@ -77,13 +78,7 @@ func (f *fakeScaleUp) ScaleUp(
 	return nil, errors.NewAutoscalerError(errors.InternalError, f.errorMsg)
 }
 
-func (f *fakeScaleUp) Initialize(
-	autoscalingContext *context.AutoscalingContext,
-	processors *ca_processors.AutoscalingProcessors,
-	clusterStateRegistry *clusterstate.ClusterStateRegistry,
-	estimatorBuilder estimator.EstimatorBuilder,
-	taintConfig taints.TaintConfig,
-) {
+func (f *fakeScaleUp) Initialize(autoscalingContext *context.AutoscalingContext, processors *ca_processors.AutoscalingProcessors, clusterStateRegistry *clusterstate.ClusterStateRegistry, estimatorBuilder estimator.EstimatorBuilder, taintConfig taints.TaintConfig, limitsProviders []resourcelimits.Provider) {
 }
 
 func (f *fakeScaleUp) ScaleUpToNodeGroupMinSize(

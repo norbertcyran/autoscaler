@@ -186,13 +186,11 @@ func (n *Nodes) unremovableReason(context *context.AutoscalingContext, scaleDown
 		return reason
 	}
 
-	resourceDelta, err := n.limitsFinder.DeltaForNode(context, node, nodeGroup, scaleDownContext.ResourcesWithLimits)
+	checkResult, err := scaleDownContext.ResourceManager.ApplyNodeDelta(context, nodeGroup, -1)
 	if err != nil {
-		klog.Errorf("Error getting node resources: %v", err)
+		klog.Errorf("Error while applying node delta for %s: %v", node.Name, err)
 		return simulator.UnexpectedError
 	}
-
-	checkResult := scaleDownContext.ResourcesLeft.TryDecrementBy(resourceDelta)
 	if checkResult.Exceeded() {
 		klog.V(4).Infof("Skipping %s - minimal limit exceeded for %v", node.Name, checkResult.ExceededResources)
 		for _, resource := range checkResult.ExceededResources {

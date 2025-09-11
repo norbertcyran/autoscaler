@@ -27,6 +27,7 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/estimator"
 	ca_processors "k8s.io/autoscaler/cluster-autoscaler/processors"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/status"
+	"k8s.io/autoscaler/cluster-autoscaler/resourcelimits"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/taints"
@@ -56,10 +57,11 @@ func (o *WrapperOrchestrator) Initialize(
 	clusterStateRegistry *clusterstate.ClusterStateRegistry,
 	estimatorBuilder estimator.EstimatorBuilder,
 	taintConfig taints.TaintConfig,
+	limitsProviders []resourcelimits.Provider,
 ) {
 	o.autoscalingContext = autoscalingContext
-	o.podsOrchestrator.Initialize(autoscalingContext, processors, clusterStateRegistry, estimatorBuilder, taintConfig)
-	o.provReqOrchestrator.Initialize(autoscalingContext, processors, clusterStateRegistry, estimatorBuilder, taintConfig)
+	o.podsOrchestrator.Initialize(autoscalingContext, processors, clusterStateRegistry, estimatorBuilder, taintConfig, limitsProviders)
+	o.provReqOrchestrator.Initialize(autoscalingContext, processors, clusterStateRegistry, estimatorBuilder, taintConfig, limitsProviders)
 }
 
 // ScaleUp run scaleUp function for regular pods of pods from ProvisioningRequest.

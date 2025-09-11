@@ -43,6 +43,7 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/observers/loopstart"
 	ca_processors "k8s.io/autoscaler/cluster-autoscaler/processors"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/status"
+	"k8s.io/autoscaler/cluster-autoscaler/resourcelimits"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/drainability/rules"
@@ -146,7 +147,8 @@ func NewStaticAutoscaler(
 	scaleUpOrchestrator scaleup.Orchestrator,
 	deleteOptions options.NodeDeleteOptions,
 	drainabilityRules rules.Rules,
-	draProvider *draprovider.Provider) *StaticAutoscaler {
+	draProvider *draprovider.Provider,
+	limitsProviders []resourcelimits.Provider) *StaticAutoscaler {
 
 	klog.V(4).Infof("Creating new static autoscaler with opts: %v", opts)
 
@@ -175,7 +177,7 @@ func NewStaticAutoscaler(
 
 	// TODO: Populate the ScaleDownActuator/Planner fields in AutoscalingContext
 	// during the struct creation rather than here.
-	scaleDownPlanner := planner.New(autoscalingContext, processors, deleteOptions, drainabilityRules)
+	scaleDownPlanner := planner.New(autoscalingContext, processors, deleteOptions, drainabilityRules, limitsProviders)
 	processorCallbacks.scaleDownPlanner = scaleDownPlanner
 
 	ndt := deletiontracker.NewNodeDeletionTracker(0 * time.Second)
@@ -185,7 +187,7 @@ func NewStaticAutoscaler(
 	if scaleUpOrchestrator == nil {
 		scaleUpOrchestrator = orchestrator.New()
 	}
-	scaleUpOrchestrator.Initialize(autoscalingContext, processors, clusterStateRegistry, estimatorBuilder, taintConfig)
+	scaleUpOrchestrator.Initialize(autoscalingContext, processors, clusterStateRegistry, estimatorBuilder, taintConfig, limitsProviders)
 
 	// Set the initial scale times to be less than the start time so as to
 	// not start in cooldown mode.

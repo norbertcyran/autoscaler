@@ -35,6 +35,7 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/provisioningrequest/conditions"
 	"k8s.io/autoscaler/cluster-autoscaler/provisioningrequest/provreqclient"
 	"k8s.io/autoscaler/cluster-autoscaler/provisioningrequest/provreqwrapper"
+	"k8s.io/autoscaler/cluster-autoscaler/resourcelimits"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/scheduling"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
@@ -69,14 +70,7 @@ func New(
 	return &checkCapacityProvClass{client: client, provreqInjector: provreqInjector}
 }
 
-func (o *checkCapacityProvClass) Initialize(
-	autoscalingContext *context.AutoscalingContext,
-	processors *ca_processors.AutoscalingProcessors,
-	clusterStateRegistry *clusterstate.ClusterStateRegistry,
-	estimatorBuilder estimator.EstimatorBuilder,
-	taintConfig taints.TaintConfig,
-	schedulingSimulator *scheduling.HintingSimulator,
-) {
+func (o *checkCapacityProvClass) Initialize(autoscalingContext *context.AutoscalingContext, processors *ca_processors.AutoscalingProcessors, clusterStateRegistry *clusterstate.ClusterStateRegistry, estimatorBuilder estimator.EstimatorBuilder, taintConfig taints.TaintConfig, schedulingSimulator *scheduling.HintingSimulator, limitsProviders []resourcelimits.Provider) {
 	o.context = autoscalingContext
 	o.schedulingSimulator = schedulingSimulator
 	if autoscalingContext.CheckCapacityBatchProcessing {
