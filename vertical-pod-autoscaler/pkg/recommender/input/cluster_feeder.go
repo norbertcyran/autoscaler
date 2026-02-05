@@ -444,9 +444,9 @@ func (feeder *clusterStateFeeder) LoadVPAs(ctx context.Context) {
 
 			for _, condition := range conditions {
 				if condition.delete {
-					delete(feeder.clusterState.VPAs()[vpaID].Conditions, condition.conditionType)
+					feeder.clusterState.VPAs()[vpaID].DeleteCondition(condition.conditionType)
 				} else {
-					feeder.clusterState.VPAs()[vpaID].Conditions.Set(condition.conditionType, true, "", condition.message)
+					feeder.clusterState.VPAs()[vpaID].SetCondition(condition.conditionType, true, "", condition.message)
 				}
 			}
 		}
@@ -492,7 +492,6 @@ func (feeder *clusterStateFeeder) LoadPods() {
 		for _, initContainer := range pod.InitContainers {
 			podInitContainers := feeder.clusterState.Pods()[pod.ID].InitContainers
 			feeder.clusterState.Pods()[pod.ID].InitContainers = append(podInitContainers, initContainer.ID.ContainerName)
-
 		}
 	}
 }

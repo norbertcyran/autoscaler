@@ -294,6 +294,8 @@ type AutoscalingOptions struct {
 	DynamicNodeDeleteDelayAfterTaintEnabled bool
 	// BypassedSchedulers are used to specify which schedulers to bypass their processing
 	BypassedSchedulers map[string]bool
+	// AllowedSchedulers when specified CA will proceed only with pods that are targeting allowed schedulers from unschedulable pods and unprocessed pods by BypassedSchedulers.
+	AllowedSchedulers map[string]bool
 	// ProvisioningRequestEnabled tells if CA processes ProvisioningRequest.
 	ProvisioningRequestEnabled bool
 	// AsyncNodeGroupsEnabled tells if CA creates/deletes node groups asynchronously.
@@ -316,6 +318,8 @@ type AutoscalingOptions struct {
 	ForceDeleteFailedNodes bool
 	// DynamicResourceAllocationEnabled configures whether logic for handling DRA objects is enabled.
 	DynamicResourceAllocationEnabled bool
+	// CSINodeAwareSchedulingEnabled configures whether logic for handling CSINode objects is enabled.
+	CSINodeAwareSchedulingEnabled bool
 	// ClusterSnapshotParallelism is the maximum parallelism of cluster snapshot creation.
 	ClusterSnapshotParallelism int
 	// PredicateParallelism is the number of goroutines to use for running scheduler predicates.
@@ -360,6 +364,7 @@ type AutoscalingOptions struct {
 	MaxNodeSkipEvalTimeTrackerEnabled bool
 	// NodeRemovalLatencyTrackingEnabled is used to enable/disable node removal latency tracking.
 	NodeRemovalLatencyTrackingEnabled bool
+	CapacityQuotasEnabled             bool
 }
 
 // KubeClientOptions specify options for kube client

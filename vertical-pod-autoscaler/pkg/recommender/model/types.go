@@ -17,6 +17,7 @@ limitations under the License.
 package model
 
 import (
+	"errors"
 	"fmt"
 	"math"
 
@@ -153,17 +154,20 @@ func ResourceAmountMax(amount1, amount2 ResourceAmount) ResourceAmount {
 }
 
 func resourceAmountFromFloat(amount float64) ResourceAmount {
-	if amount < 0 {
-		return ResourceAmount(0)
-	} else if amount > float64(MaxResourceAmount) {
+	if amount > float64(MaxResourceAmount) {
 		return MaxResourceAmount
-	} else {
-		return ResourceAmount(amount)
 	}
+
+	if amount < 0 {
+		amount = 0
+	}
+
+	return ResourceAmount(amount)
 }
 
 // HumanizeMemoryQuantity converts raw bytes to human-readable string using binary units (KiB, MiB, GiB, TiB) with two decimal places.
 func HumanizeMemoryQuantity(bytes int64) string {
+	//nolint:revive // local unit constants use conventional KiB/MiB/GiB/TiB names
 	const (
 		KiB = 1024
 		MiB = 1024 * KiB
@@ -188,7 +192,7 @@ func HumanizeMemoryQuantity(bytes int64) string {
 // RoundUpToScale rounds the value to the nearest multiple of scale, rounding up
 func RoundUpToScale(value ResourceAmount, scale int) (ResourceAmount, error) {
 	if scale <= 0 {
-		return value, fmt.Errorf("scale must be greater than zero")
+		return value, errors.New("scale must be greater than zero")
 	}
 	scale64 := int64(scale)
 	roundedValue := int64(math.Ceil(float64(value)/float64(scale64))) * scale64

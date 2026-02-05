@@ -156,7 +156,7 @@ func TestUpdateLonglivedPods(t *testing.T) {
 
 	// Pretend that the test pods started 13 hours ago.
 	timestampNow := pods[0].Status.StartTime.Add(time.Hour * 13)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		calculator.AddPod(pods[i], timestampNow)
 	}
 	result := calculator.GetSortedPods(NewDefaultPodEvictionAdmission())
@@ -190,7 +190,7 @@ func TestUpdateShortlivedPods(t *testing.T) {
 
 	// Pretend that the test pods started 11 hours ago.
 	timestampNow := pods[0].Status.StartTime.Add(time.Hour * 11)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		calculator.AddPod(pods[i], timestampNow)
 	}
 	result := calculator.GetSortedPods(NewDefaultPodEvictionAdmission())
@@ -474,7 +474,6 @@ func (p *pod1Admission) Admit(pod *apiv1.Pod, recommendation *vpa_types.Recommen
 func (p *pod1Admission) CleanUp() {}
 
 func TestAdmission(t *testing.T) {
-
 	pod1 := test.Pod().WithName("POD1").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("2")).Get()).Get()
 	pod2 := test.Pod().WithName("POD2").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("4")).Get()).Get()
 	pod3 := test.Pod().WithName("POD3").AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("1")).Get()).Get()
@@ -552,7 +551,6 @@ func TestLessPodPriority(t *testing.T) {
 			assert.Equal(t, !tc.isLess, tc.other.Less(tc.prio))
 		})
 	}
-
 }
 
 func TestAddPodLogs(t *testing.T) {

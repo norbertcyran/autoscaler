@@ -133,11 +133,11 @@ func findSpec(name string, containers []apiv1.Container) *apiv1.Container {
 }
 
 // OnAdd is Noop
-func (o *observer) OnAdd(obj interface{}, isInInitialList bool) {}
+func (o *observer) OnAdd(obj any, isInInitialList bool) {}
 
 // OnUpdate inspects if the update contains oom information and
 // passess it to the ObservedOomsChannel
-func (o *observer) OnUpdate(oldObj, newObj interface{}) {
+func (o *observer) OnUpdate(oldObj, newObj any) {
 	oldPod, ok := oldObj.(*apiv1.Pod)
 	if !ok {
 		klog.ErrorS(nil, "OOM observer received invalid oldObj", "oldObj", oldObj)
@@ -151,7 +151,6 @@ func (o *observer) OnUpdate(oldObj, newObj interface{}) {
 		if containerStatus.RestartCount > 0 &&
 			containerStatus.LastTerminationState.Terminated != nil &&
 			containerStatus.LastTerminationState.Terminated.Reason == "OOMKilled" {
-
 			oldStatus := findStatus(containerStatus.Name, oldPod.Status.ContainerStatuses)
 			if oldStatus != nil && containerStatus.RestartCount > oldStatus.RestartCount {
 				oldSpec := findSpec(containerStatus.Name, oldPod.Spec.Containers)
@@ -180,4 +179,4 @@ func (o *observer) OnUpdate(oldObj, newObj interface{}) {
 }
 
 // OnDelete is Noop
-func (*observer) OnDelete(obj interface{}) {}
+func (*observer) OnDelete(obj any) {}

@@ -29,6 +29,7 @@ import (
 	ca_processors "k8s.io/autoscaler/cluster-autoscaler/processors"
 	"k8s.io/autoscaler/cluster-autoscaler/resourcequotas"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot"
+	csinodeprovider "k8s.io/autoscaler/cluster-autoscaler/simulator/csi/provider"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/drainability/rules"
 	draprovider "k8s.io/autoscaler/cluster-autoscaler/simulator/dynamicresources/provider"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
@@ -36,6 +37,8 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/utils/backoff"
 	"k8s.io/client-go/informers"
 	kube_client "k8s.io/client-go/kubernetes"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // AutoscalerOptions is the whole set of options for configuring an autoscaler
@@ -59,4 +62,7 @@ type AutoscalerOptions struct {
 	DrainabilityRules      rules.Rules
 	DraProvider            *draprovider.Provider
 	QuotasTrackerOptions   resourcequotas.TrackerOptions
+	CSIProvider            *csinodeprovider.Provider
+	KubeClientNew          client.Client
+	KubeCache              cache.Cache
 }

@@ -17,6 +17,7 @@ limitations under the License.
 package restriction
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -64,20 +65,21 @@ type PodsRestrictionFactory interface {
 
 // PodsRestrictionFactoryImpl is the implementation of the PodsRestrictionFactory interface.
 type PodsRestrictionFactoryImpl struct {
-	client                    kube_client.Interface
-	rcInformer                cache.SharedIndexInformer // informer for Replication Controllers
-	ssInformer                cache.SharedIndexInformer // informer for Stateful Sets
-	rsInformer                cache.SharedIndexInformer // informer for Replica Sets
-	dsInformer                cache.SharedIndexInformer // informer for Daemon Sets
-	minReplicas               int
-	evictionToleranceFraction float64
-	clock                     clock.Clock
-	lastInPlaceAttemptTimeMap map[string]time.Time
-	patchCalculators          []patch.Calculator
+	client                      kube_client.Interface
+	rcInformer                  cache.SharedIndexInformer // informer for Replication Controllers
+	ssInformer                  cache.SharedIndexInformer // informer for Stateful Sets
+	rsInformer                  cache.SharedIndexInformer // informer for Replica Sets
+	dsInformer                  cache.SharedIndexInformer // informer for Daemon Sets
+	minReplicas                 int
+	evictionToleranceFraction   float64
+	clock                       clock.Clock
+	lastInPlaceAttemptTimeMap   map[string]time.Time
+	patchCalculators            []patch.Calculator
+	inPlaceSkipDisruptionBudget bool
 }
 
 // NewPodsRestrictionFactory creates a new PodsRestrictionFactory.
-func NewPodsRestrictionFactory(client kube_client.Interface, minReplicas int, evictionToleranceFraction float64, patchCalculators []patch.Calculator) (PodsRestrictionFactory, error) {
+func NewPodsRestrictionFactory(client kube_client.Interface, minReplicas int, evictionToleranceFraction float64, patchCalculators []patch.Calculator, inPlaceSkipDisruptionBudget bool) (PodsRestrictionFactory, error) {
 	rcInformer, err := setupInformer(client, replicationController)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create rcInformer: %v", err)
@@ -95,16 +97,17 @@ func NewPodsRestrictionFactory(client kube_client.Interface, minReplicas int, ev
 		return nil, fmt.Errorf("failed to create dsInformer: %v", err)
 	}
 	return &PodsRestrictionFactoryImpl{
-		client:                    client,
-		rcInformer:                rcInformer, // informer for Replication Controllers
-		ssInformer:                ssInformer, // informer for Stateful Sets
-		rsInformer:                rsInformer, // informer for Replica Sets
-		dsInformer:                dsInformer, // informer for Daemon Sets
-		minReplicas:               minReplicas,
-		evictionToleranceFraction: evictionToleranceFraction,
-		clock:                     &clock.RealClock{},
-		lastInPlaceAttemptTimeMap: make(map[string]time.Time),
-		patchCalculators:          patchCalculators,
+		client:                      client,
+		rcInformer:                  rcInformer, // informer for Replication Controllers
+		ssInformer:                  ssInformer, // informer for Stateful Sets
+		rsInformer:                  rsInformer, // informer for Replica Sets
+		dsInformer:                  dsInformer, // informer for Daemon Sets
+		minReplicas:                 minReplicas,
+		evictionToleranceFraction:   evictionToleranceFraction,
+		clock:                       &clock.RealClock{},
+		lastInPlaceAttemptTimeMap:   make(map[string]time.Time),
+		patchCalculators:            patchCalculators,
+		inPlaceSkipDisruptionBudget: inPlaceSkipDisruptionBudget,
 	}, nil
 }
 
@@ -120,7 +123,7 @@ func (f *PodsRestrictionFactoryImpl) getReplicaCount(creator podReplicaCreator) 
 		}
 		rc, ok := rcObj.(*apiv1.ReplicationController)
 		if !ok {
-			return 0, fmt.Errorf("failed to parse Replication Controller")
+			return 0, errors.New("failed to parse Replication Controller")
 		}
 		if rc.Spec.Replicas == nil || *rc.Spec.Replicas == 0 {
 			return 0, fmt.Errorf("replication controller %s/%s has no replicas config", creator.Namespace, creator.Name)
@@ -136,7 +139,7 @@ func (f *PodsRestrictionFactoryImpl) getReplicaCount(creator podReplicaCreator) 
 		}
 		rs, ok := rsObj.(*appsv1.ReplicaSet)
 		if !ok {
-			return 0, fmt.Errorf("failed to parse Replicaset")
+			return 0, errors.New("failed to parse Replicaset")
 		}
 		if rs.Spec.Replicas == nil || *rs.Spec.Replicas == 0 {
 			return 0, fmt.Errorf("replica set %s/%s has no replicas config", creator.Namespace, creator.Name)
@@ -152,7 +155,7 @@ func (f *PodsRestrictionFactoryImpl) getReplicaCount(creator podReplicaCreator) 
 		}
 		ss, ok := ssObj.(*appsv1.StatefulSet)
 		if !ok {
-			return 0, fmt.Errorf("failed to parse StatefulSet")
+			return 0, errors.New("failed to parse StatefulSet")
 		}
 		if ss.Spec.Replicas == nil || *ss.Spec.Replicas == 0 {
 			return 0, fmt.Errorf("stateful set %s/%s has no replicas config", creator.Namespace, creator.Name)
@@ -168,7 +171,7 @@ func (f *PodsRestrictionFactoryImpl) getReplicaCount(creator podReplicaCreator) 
 		}
 		ds, ok := dsObj.(*appsv1.DaemonSet)
 		if !ok {
-			return 0, fmt.Errorf("failed to parse DaemonSet")
+			return 0, errors.New("failed to parse DaemonSet")
 		}
 		if ds.Status.NumberReady == 0 {
 			return 0, fmt.Errorf("daemon set %s/%s has no number ready pods", creator.Namespace, creator.Name)
@@ -240,7 +243,6 @@ func (f *PodsRestrictionFactoryImpl) GetCreatorMaps(pods []*apiv1.Pod, vpa *vpa_
 		}
 		singleGroup.running = len(replicas) - singleGroup.pending
 		creatorToSingleGroupStatsMap[creator] = singleGroup
-
 	}
 	return creatorToSingleGroupStatsMap, podToReplicaCreatorMap, nil
 }
@@ -265,6 +267,7 @@ func (f *PodsRestrictionFactoryImpl) NewPodsInPlaceRestriction(creatorToSingleGr
 		clock:                        f.clock,
 		lastInPlaceAttemptTimeMap:    f.lastInPlaceAttemptTimeMap,
 		patchCalculators:             f.patchCalculators,
+		inPlaceSkipDisruptionBudget:  f.inPlaceSkipDisruptionBudget,
 	}
 }
 

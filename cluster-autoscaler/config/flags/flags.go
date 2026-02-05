@@ -72,7 +72,6 @@ var (
 	cloudConfig             = flag.String("cloud-config", "", "The path to the cloud provider configuration file.  Empty string for no configuration file.")
 	namespace               = flag.String("namespace", "kube-system", "Namespace in which cluster-autoscaler run.")
 	enforceNodeGroupMinSize = flag.Bool("enforce-node-group-min-size", false, "Should CA scale up the node group to the configured min size if needed.")
-	scaleDownEnabled        = flag.Bool("scale-down-enabled", true, "Should CA scale down the cluster")
 	scaleDownUnreadyEnabled = flag.Bool("scale-down-unready-enabled", true, "Should CA scale down unready nodes of the cluster")
 	scaleDownDelayAfterAdd  = flag.Duration("scale-down-delay-after-add", 10*time.Minute,
 		"How long after scale up that scale down evaluation resumes")
@@ -126,7 +125,7 @@ var (
 	scaleUpFromZero           = flag.Bool("scale-up-from-zero", true, "Should CA scale up when there are 0 ready nodes.")
 	parallelScaleUp           = flag.Bool("parallel-scale-up", false, "Whether to allow parallel node groups scale up. Experimental: may not work on some cloud providers, enable at your own risk.")
 	maxNodeProvisionTime      = flag.Duration("max-node-provision-time", 15*time.Minute, "The default maximum time CA waits for node to be provisioned - the value can be overridden per node group")
-	maxNodeStartupTime        = flag.Duration("max-node-start-up-time", 15*time.Minute, "The maximum time from the moment the node is registered to the time the node is ready - the value can be overridden per node group")
+	maxNodeStartupTime        = flag.Duration("max-node-startup-time", 15*time.Minute, "The maximum time from the moment the node is registered to the time the node is ready - the value can be overridden per node group")
 	maxPodEvictionTime        = flag.Duration("max-pod-eviction-time", 2*time.Minute, "Maximum time CA tries to evict a pod before giving up")
 	nodeGroupsFlag            = multiStringFlag(
 		"nodes",
@@ -210,6 +209,7 @@ var (
 	forceDaemonSets                         = flag.Bool("force-ds", false, "Blocks scale-up of node groups too small for all suitable Daemon Sets pods.")
 	dynamicNodeDeleteDelayAfterTaintEnabled = flag.Bool("dynamic-node-delete-delay-after-taint-enabled", false, "Enables dynamic adjustment of NodeDeleteDelayAfterTaint based of the latency between CA and api-server")
 	bypassedSchedulers                      = pflag.StringSlice("bypassed-scheduler-names", []string{}, "Names of schedulers to bypass. If set to non-empty value, CA will not wait for pods to reach a certain age before triggering a scale-up.")
+	allowedSchedulers                       = pflag.StringSlice("allowed-scheduler-names", []string{}, "If set to non-empty value, CA will proceed only with pods targeting schedulers in the list, from the list of unschedulable and scheduler unprocessed pods")
 	drainPriorityConfig                     = flag.String("drain-priority-config", "",
 		"List of ',' separated pairs (priority:terminationGracePeriodSeconds) of integers separated by ':' enables priority evictor. Priority evictor groups pods into priority groups based on pod priority and evict pods in the ascending order of group priorities"+
 			"--max-graceful-termination-sec flag should not be set when this flag is set. Not setting this flag will use unordered evictor by default."+
@@ -229,6 +229,7 @@ var (
 	forceDeleteLongUnregisteredNodes             = flag.Bool("force-delete-unregistered-nodes", false, "Whether to enable force deletion of long unregistered nodes, regardless of the min size of the node group the belong to.")
 	forceDeleteFailedNodes                       = flag.Bool("force-delete-failed-nodes", false, "Whether to enable force deletion of failed nodes, regardless of the min size of the node group the belong to.")
 	enableDynamicResourceAllocation              = flag.Bool("enable-dynamic-resource-allocation", true, "Handle DRA (Dynamic Resource Allocation) objects, locked to true.")
+	enableCSINodeAwareScheduling                 = flag.Bool("enable-csi-node-aware-scheduling", false, "Whether logic for handling CSINode objects is enabled.")
 	clusterSnapshotParallelism                   = flag.Int("cluster-snapshot-parallelism", 16, "Maximum parallelism of cluster snapshot creation.")
 	predicateParallelism                         = flag.Int("predicate-parallelism", 4, "Maximum parallelism of scheduler predicate checking.")
 	checkCapacityProcessorInstance               = flag.String("check-capacity-processor-instance", "", "Name of the processor instance. Only ProvisioningRequests that define this name in their parameters with the key \"processorInstance\" will be processed by this CA instance. It only refers to check capacity ProvisioningRequests, but if not empty, best-effort atomic ProvisioningRequests processing is disabled in this instance. Not recommended: Until CA 1.35, ProvisioningRequests with this name as prefix in their class will be also processed.")
@@ -237,9 +238,11 @@ var (
 	capacitybufferPodInjectionEnabled            = flag.Bool("capacity-buffer-pod-injection-enabled", false, "Whether to enable pod list processor that processes ready capacity buffers and injects fake pods accordingly")
 	nodeRemovalLatencyTrackingEnabled            = flag.Bool("node-removal-latency-tracking-enabled", false, "Whether to track latency from when an unneeded node is eligible for scale down until it is removed or needed again.")
 	maxNodeSkipEvalTimeTrackerEnabled            = flag.Bool("max-node-skip-eval-time-tracker-enabled", false, "Whether to enable the tracking of the maximum time of node being skipped during ScaleDown")
+	capacityQuotasEnabled                        = flag.Bool("capacity-quotas-enabled", false, "Whether to enable CapacityQuota CRD support.")
 
 	// Deprecated flags
 	ignoreTaintsFlag = multiStringFlag("ignore-taint", "Specifies a taint to ignore in node templates when considering to scale a node group (Deprecated, use startup-taints instead)")
+	scaleDownEnabled = flag.Bool("scale-down-enabled", true, "[Deprecated] Should CA scale down the cluster")
 )
 
 var autoscalingOptions *config.AutoscalingOptions
@@ -298,6 +301,10 @@ func createAutoscalingOptions() config.AutoscalingOptions {
 
 	if !ptr.Deref(enableDynamicResourceAllocation, false) {
 		klog.Fatalf("--enable-dynamic-resource-allocation flag must be true: %t", ptr.Deref(enableDynamicResourceAllocation, false))
+	}
+
+	if *scaleDownEnabled == false {
+		klog.Warningf("--scale-down-enabled flag is deprecated and will be removed in a future release")
 	}
 
 	return config.AutoscalingOptions{
@@ -402,7 +409,8 @@ func createAutoscalingOptions() config.AutoscalingOptions {
 			MaxFreeDifferenceRatio:           *maxFreeDifferenceRatio,
 		},
 		DynamicNodeDeleteDelayAfterTaintEnabled:      *dynamicNodeDeleteDelayAfterTaintEnabled,
-		BypassedSchedulers:                           scheduler_util.GetBypassedSchedulersMap(*bypassedSchedulers),
+		BypassedSchedulers:                           scheduler_util.SchedulersMap(*bypassedSchedulers),
+		AllowedSchedulers:                            parseAllowedSchedulers(*allowedSchedulers, *bypassedSchedulers),
 		ProvisioningRequestEnabled:                   *provisioningRequestsEnabled,
 		AsyncNodeGroupsEnabled:                       *asyncNodeGroupsEnabled,
 		ProvisioningRequestInitialBackoffTime:        *provisioningRequestInitialBackoffTime,
@@ -414,6 +422,7 @@ func createAutoscalingOptions() config.AutoscalingOptions {
 		ForceDeleteLongUnregisteredNodes:             *forceDeleteLongUnregisteredNodes,
 		ForceDeleteFailedNodes:                       *forceDeleteFailedNodes,
 		DynamicResourceAllocationEnabled:             *enableDynamicResourceAllocation,
+		CSINodeAwareSchedulingEnabled:                *enableCSINodeAwareScheduling,
 		ClusterSnapshotParallelism:                   *clusterSnapshotParallelism,
 		PredicateParallelism:                         *predicateParallelism,
 		CheckCapacityProcessorInstance:               *checkCapacityProcessorInstance,
@@ -434,6 +443,7 @@ func createAutoscalingOptions() config.AutoscalingOptions {
 		CapacitybufferPodInjectionEnabled:            *capacitybufferPodInjectionEnabled,
 		NodeRemovalLatencyTrackingEnabled:            *nodeRemovalLatencyTrackingEnabled,
 		MaxNodeSkipEvalTimeTrackerEnabled:            *maxNodeSkipEvalTimeTrackerEnabled,
+		CapacityQuotasEnabled:                        *capacityQuotasEnabled,
 	}
 }
 
@@ -549,4 +559,19 @@ func parseShutdownGracePeriodsAndPriorities(priorityGracePeriodStr string) []kub
 		})
 	}
 	return priorityGracePeriodMap
+}
+
+func parseAllowedSchedulers(allowedSchedulers, bypassedSchedulers []string) map[string]bool {
+	allowedSchedulersMap := scheduler_util.SchedulersMap(allowedSchedulers)
+	if len(allowedSchedulers) == 0 {
+		return allowedSchedulersMap
+	}
+	bypassedSchedulersMap := scheduler_util.SchedulersMap(bypassedSchedulers)
+
+	for scheduler := range bypassedSchedulersMap {
+		if found := allowedSchedulersMap[scheduler]; !found {
+			klog.Fatalf("Invalid configuration. --bypassed-scheduler-names should be a subset of --allowed-scheduler-names. %s not included in --allowed-scheduler-names", scheduler)
+		}
+	}
+	return allowedSchedulersMap
 }

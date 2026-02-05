@@ -18,7 +18,7 @@ package logic
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"strconv"
 	"testing"
 	"time"
@@ -65,7 +65,7 @@ func TestRunOnce_Mode(t *testing.T) {
 	}{
 		{
 			name:                  "with Auto mode",
-			updateMode:            vpa_types.UpdateModeAuto,
+			updateMode:            vpa_types.UpdateModeAuto, //nolint:staticcheck
 			shouldInPlaceFail:     false,
 			expectFetchCalls:      true,
 			expectedEvictionCount: 5,
@@ -177,7 +177,7 @@ func TestRunOnce_Status(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			testRunOnceBase(
 				t,
-				vpa_types.UpdateModeAuto,
+				vpa_types.UpdateModeRecreate,
 				false,
 				tc.statusValidator,
 				tc.expectFetchCalls,
@@ -235,7 +235,7 @@ func testRunOnceBase(
 
 		inplace.On("CanInPlaceUpdate", pods[i]).Return(canInPlaceUpdate)
 		if shouldInPlaceFail {
-			inplace.On("InPlaceUpdate", pods[i], nil).Return(fmt.Errorf("in-place update failed"))
+			inplace.On("InPlaceUpdate", pods[i], nil).Return(errors.New("in-place update failed"))
 		} else {
 			inplace.On("InPlaceUpdate", pods[i], nil).Return(nil)
 		}
@@ -483,7 +483,7 @@ func TestNewEventRecorder(t *testing.T) {
 			var events *apiv1.EventList
 			var err error
 			// Add delay for fake client to catch up due to be being asynchronous
-			for i := 0; i < maxRetries; i++ {
+			for range maxRetries {
 				ctx, cancel := context.WithTimeout(context.Background(), contextTimeout)
 				defer cancel()
 				events, err = fakeClient.CoreV1().Events("default").List(ctx, metav1.ListOptions{})
@@ -514,7 +514,7 @@ func TestLogDeprecationWarnings(t *testing.T) {
 	}{
 		{
 			name:             "Auto mode should trigger deprecation warning logic",
-			updateMode:       &[]vpa_types.UpdateMode{vpa_types.UpdateModeAuto}[0],
+			updateMode:       &[]vpa_types.UpdateMode{vpa_types.UpdateModeAuto}[0], //nolint:staticcheck
 			shouldLogWarning: true,
 		},
 		{
@@ -557,7 +557,7 @@ func TestLogDeprecationWarnings(t *testing.T) {
 
 			shouldLogWarning := vpa.Spec.UpdatePolicy != nil &&
 				vpa.Spec.UpdatePolicy.UpdateMode != nil &&
-				*vpa.Spec.UpdatePolicy.UpdateMode == vpa_types.UpdateModeAuto
+				*vpa.Spec.UpdatePolicy.UpdateMode == vpa_types.UpdateModeAuto //nolint:staticcheck
 
 			assert.Equal(t, tc.shouldLogWarning, shouldLogWarning,
 				"Expected shouldLogWarning=%v for test case %s", tc.shouldLogWarning, tc.name)
