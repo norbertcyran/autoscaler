@@ -60,10 +60,10 @@ func (s *ScaleObjectPodResolver) GetTemplateAndReplicas(namespace, group, kind, 
 		return nil, nil, fmt.Errorf("failed to get existing pod for scale object: %w", err)
 	}
 	if len(podsList) == 0 {
-		return nil, &obj.Status.Replicas, nil
+		return nil, &obj.Spec.Replicas, nil
 	}
 	pod := getMostRecentPod(podsList)
-	return buildPodTemplateFromPod(pod), &obj.Status.Replicas, nil
+	return buildPodTemplateFromPod(pod), &obj.Spec.Replicas, nil
 }
 
 func getMostRecentPod(podList []corev1.Pod) *corev1.Pod {
