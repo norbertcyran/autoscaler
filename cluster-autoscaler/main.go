@@ -33,6 +33,7 @@ import (
 	"k8s.io/apiserver/pkg/server/mux"
 	"k8s.io/apiserver/pkg/server/routes"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	cbv1beta1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	cqv1alpha1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacityquota/autoscaling.x-k8s.io/v1alpha1"
 	autoscalerbuilder "k8s.io/autoscaler/cluster-autoscaler/builder"
 	"k8s.io/autoscaler/cluster-autoscaler/config"
@@ -69,7 +70,7 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(cqv1alpha1.AddToScheme(scheme))
-	// TODO: add other CRDs
+	utilruntime.Must(cbv1beta1.AddToScheme(scheme))
 }
 
 func registerSignalHandlers(autoscaler core.Autoscaler) {

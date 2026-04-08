@@ -24,13 +24,17 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/utils/clock"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	"k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	capacitybuffer "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/client/clientset/versioned"
 	cbapi "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer"
 	cbclient "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/client"
@@ -87,15 +91,36 @@ var _ = BeforeSuite(func() {
 
 	resolver := fakepods.NewDryRunResolver(k8sClient)
 	reconciliationCache = cbmetrics.NewReconciliationCache()
-	controller := cbctrl.NewDefaultBufferController(
+
+	s := runtime.NewScheme()
+	Expect(clientgoscheme.AddToScheme(s)).To(Succeed())
+	Expect(v1beta1.AddToScheme(s)).To(Succeed())
+
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+		Scheme: s,
+	})
+	Expect(err).NotTo(HaveOccurred())
+
+	realClock := clock.RealClock{}
+	defaultStrategies := []string{cbapi.ActiveProvisioningStrategy, ""}
+	
+	reconciler := cbctrl.NewCapacityBufferReconciler(
+		mgr.GetClient(),
 		client,
 		resolver,
-		[]string{cbapi.ActiveProvisioningStrategy, ""},
+		defaultStrategies,
 		reconciliationCache,
-		clock.RealClock{},
+		realClock,
 	)
+	
+	err = reconciler.SetupWithManager(ctx, mgr)
+	Expect(err).NotTo(HaveOccurred())
+	
 
-	go controller.Run(ctx.Done())
+	go func() {
+		err := mgr.Start(ctx)
+		Expect(err).NotTo(HaveOccurred())
+	}()
 })
 
 var _ = AfterSuite(func() {

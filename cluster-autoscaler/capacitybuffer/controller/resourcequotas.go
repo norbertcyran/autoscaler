@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"fmt"
 	"math"
 
@@ -26,18 +27,18 @@ import (
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/types"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
-	cbclient "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/client"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/common"
 	podutils "k8s.io/autoscaler/cluster-autoscaler/utils/pod"
 	"k8s.io/klog/v2"
 )
 
 type resourceQuotaAllocator struct {
-	client *cbclient.CapacityBufferClient
+	client client.Client
 }
 
 // newResourceQuotaAllocator creates an instance of resourceQuotaAllocator.
-func newResourceQuotaAllocator(client *cbclient.CapacityBufferClient) *resourceQuotaAllocator {
+func newResourceQuotaAllocator(client client.Client) *resourceQuotaAllocator {
 	return &resourceQuotaAllocator{
 		client: client,
 	}
@@ -57,10 +58,16 @@ func newResourceQuotaAllocator(client *cbclient.CapacityBufferClient) *resourceQ
 //   - if number of allowed replicas < the current buffer's .Status.Replicas, add LimitedByQuota condition
 //     to the buffer and limit the buffer's .Status.Replicas
 //   - update usages by the buffers for matching quotas (which will be used when handling next buffers)
-func (r *resourceQuotaAllocator) Allocate(namespace string, buffers []*v1.CapacityBuffer) []error {
-	quotas, err := r.client.ListResourceQuotas(namespace)
+func (r *resourceQuotaAllocator) Allocate(ctx context.Context, namespace string, buffers []*v1.CapacityBuffer) []error {
+	var quotaList corev1.ResourceQuotaList
+	err := r.client.List(ctx, &quotaList, client.InNamespace(namespace))
 	if err != nil {
 		return []error{fmt.Errorf("resourceQuotaAllocator: Failed to list resource quotas, error: %v", err)}
+	}
+
+	quotas := make([]*corev1.ResourceQuota, len(quotaList.Items))
+	for i := range quotaList.Items {
+		quotas[i] = &quotaList.Items[i]
 	}
 
 	usages := make(map[types.UID]corev1.ResourceList)
@@ -78,7 +85,8 @@ func (r *resourceQuotaAllocator) Allocate(namespace string, buffers []*v1.Capaci
 			continue
 		}
 
-		podTemplate, err := r.client.GetPodTemplate(buffer.Namespace, buffer.Status.PodTemplateRef.Name)
+		var podTemplate corev1.PodTemplate
+		err := r.client.Get(ctx, client.ObjectKey{Namespace: buffer.Namespace, Name: buffer.Status.PodTemplateRef.Name}, &podTemplate)
 		if err != nil {
 			klog.V(4).Infof("resourceQuotaAllocator: Skipping buffer %s (pod template not found)", buffer.Name)
 			continue

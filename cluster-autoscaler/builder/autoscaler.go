@@ -56,10 +56,13 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/options"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/scheduling"
 	kube_util "k8s.io/autoscaler/cluster-autoscaler/utils/kubernetes"
+
+	cbmetrics "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/metrics"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
@@ -199,7 +202,24 @@ func (b *AutoscalerBuilder) Build(ctx context.Context) (core.Autoscaler, *loop.L
 			} else {
 				fakePodsResolver = fakepods.NewDefaultingResolver()
 			}
-			cbctrl.InitializeAndRunDefaultBufferController(ctx, capacitybufferClient, fakePodsResolver)
+			realClock := clock.RealClock{}
+			reconciliationCache := cbmetrics.NewReconciliationCache()
+			defaultStrategies := []string{capacitybuffer.ActiveProvisioningStrategy, ""}
+			
+			reconciler := cbctrl.NewCapacityBufferReconciler(
+				b.manager.GetClient(),
+				capacitybufferClient,
+				fakePodsResolver,
+				defaultStrategies,
+				reconciliationCache,
+				realClock,
+			)
+			
+			if err := reconciler.SetupWithManager(ctx, b.manager); err != nil {
+				klog.Errorf("Failed to setup CapacityBuffer controller: %v", err)
+			}
+			
+			cbmetrics.RegisterReconciliationTimestampCollector(capacitybufferClient, defaultStrategies, reconciliationCache, realClock)
 		}
 	}
 

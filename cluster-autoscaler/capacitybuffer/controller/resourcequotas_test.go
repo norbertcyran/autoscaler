@@ -27,10 +27,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	"k8s.io/autoscaler/cluster-autoscaler/capacitybuffer"
-	cbclient "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/client"
 	"k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/testutil"
 	podutils "k8s.io/autoscaler/cluster-autoscaler/utils/pod"
-	fakeClient "k8s.io/client-go/kubernetes/fake"
+	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestResourceQuotaAllocator(t *testing.T) {
@@ -494,9 +493,12 @@ func TestResourceQuotaAllocator(t *testing.T) {
 				}
 			}
 
-			fakeK8s := fakeClient.NewSimpleClientset(objs...)
-			client, _ := cbclient.NewCapacityBufferClient(nil, fakeK8s, nil, nil, nil, nil, nil, nil, nil, nil, nil)
-			allocator := newResourceQuotaAllocator(client)
+			scheme := runtime.NewScheme()
+			assert.NoError(t, corev1.AddToScheme(scheme))
+			assert.NoError(t, v1.AddToScheme(scheme))
+			
+			fakeClient := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
+			allocator := newResourceQuotaAllocator(fakeClient)
 
 			// Assign namespace and names to buffers
 			for i, buffer := range tt.buffers {
@@ -506,7 +508,7 @@ func TestResourceQuotaAllocator(t *testing.T) {
 				}
 			}
 
-			errs := allocator.Allocate("default", tt.buffers)
+			errs := allocator.Allocate(t.Context(), "default", tt.buffers)
 			assert.Empty(t, errs)
 
 			for i, buffer := range tt.buffers {
