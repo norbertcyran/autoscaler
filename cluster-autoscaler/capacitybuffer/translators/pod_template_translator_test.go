@@ -26,15 +26,16 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/autoscaler/cluster-autoscaler/capacitybuffer"
 	"k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/fakepods"
-	fakeClient "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/utils/ptr"
 
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
-	cbclient "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/client"
 	"k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/testutil"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestPodTemplateBufferTranslator(t *testing.T) {
@@ -66,10 +67,12 @@ func TestPodTemplateBufferTranslator(t *testing.T) {
 		"cpu":            resource.MustParse("1000m"),
 	})
 	zero := int64(0)
-	fakeClient := fakeClient.NewSimpleClientset(registeredPodTemplate, anotherRegisteredPodTemplate, podTemp4mem100cpu, podTemp8mem200cpu, podTemp4gpu)
-	fakeCapacityBuffersClient, _ := cbclient.NewCapacityBufferClient(nil, fakeClient, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	scheme := runtime.NewScheme()
+	corev1.AddToScheme(scheme)
+	v1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(registeredPodTemplate, anotherRegisteredPodTemplate, podTemp4mem100cpu, podTemp8mem200cpu, podTemp4gpu).Build()
 	noReplicasMsg := "Buffer not ready for provisioning: couldn't get number of replicas for buffer: replicas, percentage and limits are not defined"
-	podTemplateNotFoundMsg := "Buffer not ready for provisioning: capacity buffer client can't get pod template: podtemplates %q not found"
+	podTemplateNotFoundMsg := "Buffer not ready for provisioning: podtemplates %q not found"
 	resourcesNotFoundMsg := "Buffer not ready for provisioning: couldn't get number of replicas for buffer: resources in configured limits not found in the pod template"
 	tests := []struct {
 		name                   string
@@ -236,7 +239,7 @@ func TestPodTemplateBufferTranslator(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			resolver := fakepods.NewDefaultingResolver()
-			podTemplateBufferTranslator := NewPodTemplateBufferTranslator(fakeCapacityBuffersClient, resolver)
+			podTemplateBufferTranslator := NewPodTemplateBufferTranslator(fakeClient, resolver)
 			errors := podTemplateBufferTranslator.Translate(test.buffers)
 			assert.Equal(t, len(errors), test.expectedNumberOfErrors)
 			for i, buffer := range test.buffers {
@@ -283,17 +286,20 @@ func TestPodTemplateBufferTranslator_ManagedPodTemplate(t *testing.T) {
 		},
 	)
 
-	fakeClient := fakeClient.NewSimpleClientset(bufferPodTemplate)
-	fakeCapacityBuffersClient, _ := cbclient.NewCapacityBufferClient(nil, fakeClient, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	scheme := runtime.NewScheme()
+	corev1.AddToScheme(scheme)
+	v1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(bufferPodTemplate).Build()
 	resolver := fakepods.NewDefaultingResolver()
-	podTemplateBufferTranslator := NewPodTemplateBufferTranslator(fakeCapacityBuffersClient, resolver)
+	podTemplateBufferTranslator := NewPodTemplateBufferTranslator(fakeClient, resolver)
 	buffers := []*v1.CapacityBuffer{buffer}
 	errors := podTemplateBufferTranslator.Translate(buffers)
 	assert.Equal(t, 0, len(errors))
 
-	gotManagedPodTemplate, err := fakeClient.CoreV1().PodTemplates("default").Get(t.Context(), "capacitybuffer-test-buffer-pod-template", metav1.GetOptions{})
+	gotManagedPodTemplate := &corev1.PodTemplate{}
+	err := fakeClient.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "capacitybuffer-test-buffer-pod-template"}, gotManagedPodTemplate)
 	assert.NoError(t, err)
-	if diff := cmp.Diff(wantManagedTemplate, gotManagedPodTemplate, cmpopts.EquateEmpty()); diff != "" {
+	if diff := cmp.Diff(wantManagedTemplate, gotManagedPodTemplate, cmpopts.EquateEmpty(), cmpopts.IgnoreFields(metav1.ObjectMeta{}, "ResourceVersion")); diff != "" {
 		t.Errorf("managed pod template mismatch (-want +got):\n%s", diff)
 	}
 }

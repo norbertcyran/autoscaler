@@ -17,17 +17,19 @@ limitations under the License.
 package updater
 
 import (
+	"context"
+
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
-	cbclient "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/client"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // StatusUpdater updates the buffer status bassed
 type StatusUpdater struct {
-	client *cbclient.CapacityBufferClient
+	client client.Client
 }
 
 // NewStatusUpdater creates an instance of StatusUpdater.
-func NewStatusUpdater(client *cbclient.CapacityBufferClient) *StatusUpdater {
+func NewStatusUpdater(client client.Client) *StatusUpdater {
 	return &StatusUpdater{
 		client: client,
 	}
@@ -39,14 +41,12 @@ func (u *StatusUpdater) Update(buffers []*v1.CapacityBuffer) ([]*v1.CapacityBuff
 	var updatedBuffers []*v1.CapacityBuffer
 
 	for _, buffer := range buffers {
-		updatedBuffer, err := u.client.UpdateCapacityBuffer(buffer)
+		err := u.client.Status().Update(context.TODO(), buffer)
 		if err != nil {
 			errors = append(errors, err)
 			continue
 		}
-		if updatedBuffer != nil {
-			updatedBuffers = append(updatedBuffers, updatedBuffer)
-		}
+		updatedBuffers = append(updatedBuffers, buffer)
 	}
 	return updatedBuffers, errors
 }

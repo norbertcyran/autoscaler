@@ -21,19 +21,23 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/utils/clock"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	"k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	capacitybuffer "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/client/clientset/versioned"
 	cbapi "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer"
-	cbclient "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/client"
 	cbctrl "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/controller"
 	"k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/fakepods"
 	cbmetrics "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/metrics"
@@ -82,29 +86,45 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	Expect(buffersClient).NotTo(BeNil())
 
-	client, err := cbclient.NewCapacityBufferClientFromConfig(cfg)
-	Expect(err).NotTo(HaveOccurred())
-
 	resolver := fakepods.NewDryRunResolver(k8sClient)
 	reconciliationCache = cbmetrics.NewReconciliationCache()
-	controller := cbctrl.NewDefaultBufferController(
-		client,
+
+	s := runtime.NewScheme()
+	Expect(clientgoscheme.AddToScheme(s)).To(Succeed())
+	Expect(v1beta1.AddToScheme(s)).To(Succeed())
+
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+		Scheme: s,
+	})
+	Expect(err).NotTo(HaveOccurred())
+
+	realClock := clock.RealClock{}
+	defaultStrategies := []string{cbapi.ActiveProvisioningStrategy, ""}
+
+	reconciler := cbctrl.NewCapacityBufferReconciler(
+		mgr.GetClient(),
 		resolver,
-		[]string{cbapi.ActiveProvisioningStrategy, ""},
+		defaultStrategies,
 		reconciliationCache,
-		clock.RealClock{},
+		realClock,
 	)
 
-	go controller.Run(ctx.Done())
+	err = reconciler.SetupWithManager(ctx, mgr)
+	Expect(err).NotTo(HaveOccurred())
+
+	go func() {
+		defer GinkgoRecover()
+		err := mgr.Start(ctx)
+		Expect(err).NotTo(HaveOccurred())
+	}()
 })
 
 var _ = AfterSuite(func() {
-	cancel()
 	By("tearing down the test environment")
-	err := testEnv.Stop()
-	if err != nil {
-		logf.Log.Error(err, "failed to stop test environment")
-	}
+	cancel()
+	Eventually(func() error {
+		return testEnv.Stop()
+	}, time.Minute, time.Second).Should(Succeed())
 })
 
 // getFirstFoundEnvTestBinaryDir locates the first binary in the specified path.

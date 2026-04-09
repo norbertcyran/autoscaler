@@ -17,12 +17,19 @@ limitations under the License.
 package scalableobject
 
 import (
+	"context"
 	"fmt"
 	"sort"
 
+	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv1 "k8s.io/api/autoscaling/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	cbclient "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/client"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // Kinds of the supported objects
@@ -39,11 +46,11 @@ const (
 
 // ScaleObjectPodResolver resolves scale objects into pod specs and number of replicas only if there is at least one exiting pod
 type ScaleObjectPodResolver struct {
-	client *cbclient.CapacityBufferClient
+	client client.Client
 }
 
 // NewScaleObjectPodResolver returns new ScaleObjectPodResolver
-func NewScaleObjectPodResolver(client *cbclient.CapacityBufferClient) *ScaleObjectPodResolver {
+func NewScaleObjectPodResolver(client client.Client) *ScaleObjectPodResolver {
 	return &ScaleObjectPodResolver{
 		client: client,
 	}
@@ -51,19 +58,55 @@ func NewScaleObjectPodResolver(client *cbclient.CapacityBufferClient) *ScaleObje
 
 // GetTemplateAndReplicas returns the pod spec template of the passed object name and namespace
 func (s *ScaleObjectPodResolver) GetTemplateAndReplicas(namespace, group, kind, name string) (*corev1.PodTemplateSpec, *int32, error) {
-	obj, err := s.client.GetScaleObject(namespace, group, kind, name)
+	ctx := context.TODO()
+	scale, err := s.getScaleSubresource(ctx, namespace, group, kind, name)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get scale object: %w", err)
+		return nil, nil, err
 	}
-	podsList, err := s.client.GetPodsBySelector(namespace, obj.Status.Selector)
+
+	pods, err := s.getPodsForScale(ctx, namespace, scale)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get existing pod for scale object: %w", err)
+		return nil, nil, err
 	}
-	if len(podsList) == 0 {
-		return nil, &obj.Status.Replicas, nil
+
+	if len(pods) == 0 {
+		return nil, &scale.Status.Replicas, nil
 	}
-	pod := getMostRecentPod(podsList)
-	return buildPodTemplateFromPod(pod), &obj.Status.Replicas, nil
+	pod := getMostRecentPod(pods)
+	return buildPodTemplateFromPod(pod), &scale.Status.Replicas, nil
+}
+
+func (s *ScaleObjectPodResolver) getScaleSubresource(ctx context.Context, namespace, group, kind, name string) (*autoscalingv1.Scale, error) {
+	mapping, err := s.client.RESTMapper().RESTMapping(schema.GroupKind{Group: group, Kind: kind})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get REST mapping: %w", err)
+	}
+
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(mapping.GroupVersionKind)
+	u.SetNamespace(namespace)
+	u.SetName(name)
+
+	scale := &autoscalingv1.Scale{}
+	err = s.client.SubResource("scale").Get(ctx, u, scale)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get scale: %w", err)
+	}
+	return scale, nil
+}
+
+func (s *ScaleObjectPodResolver) getPodsForScale(ctx context.Context, namespace string, scale *autoscalingv1.Scale) ([]corev1.Pod, error) {
+	selector, err := labels.Parse(scale.Status.Selector)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse selector: %w", err)
+	}
+
+	podsList := &corev1.PodList{}
+	err = s.client.List(ctx, podsList, client.InNamespace(namespace), client.MatchingLabelsSelector{Selector: selector})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list pods: %w", err)
+	}
+	return podsList.Items, nil
 }
 
 func getMostRecentPod(podList []corev1.Pod) *corev1.Pod {
@@ -85,7 +128,7 @@ func buildPodTemplateFromPod(pod *corev1.Pod) *corev1.PodTemplateSpec {
 }
 
 // GetSupportedScalableObjectResolvers returns the default ScalableObjectResolvers
-func GetSupportedScalableObjectResolvers(client *cbclient.CapacityBufferClient) []ScalableObjectTemplateResolver {
+func GetSupportedScalableObjectResolvers(client client.Client) []ScalableObjectTemplateResolver {
 	return []ScalableObjectTemplateResolver{
 		&deployment{scalableObjectTemplateResolver{client: client, kind: DeploymentKind, apiGroup: ApiGroupApps}},
 		&replicaSet{scalableObjectTemplateResolver{client: client, kind: ReplicaSetKind, apiGroup: ApiGroupApps}},
@@ -102,7 +145,7 @@ type ScalableObjectTemplateResolver interface {
 }
 
 type scalableObjectTemplateResolver struct {
-	client   *cbclient.CapacityBufferClient
+	client   client.Client
 	kind     string
 	apiGroup string
 }
@@ -121,7 +164,8 @@ type deployment struct{ scalableObjectTemplateResolver }
 
 // GetTemplateAndReplicas returns the pod spec template of the passed object name and namespace
 func (s *deployment) GetTemplateAndReplicas(namespace, name string) (*corev1.PodTemplateSpec, *int32, error) {
-	obj, err := s.client.GetDeployment(namespace, name)
+	obj := &appsv1.Deployment{}
+	err := s.client.Get(context.TODO(), client.ObjectKey{Namespace: namespace, Name: name}, obj)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get Deployment: %w", err)
 	}
@@ -132,9 +176,10 @@ type replicaSet struct{ scalableObjectTemplateResolver }
 
 // GetTemplateAndReplicas returns the pod spec template of the passed object name and namespace
 func (s *replicaSet) GetTemplateAndReplicas(namespace, name string) (*corev1.PodTemplateSpec, *int32, error) {
-	obj, err := s.client.GetReplicaSet(namespace, name)
+	obj := &appsv1.ReplicaSet{}
+	err := s.client.Get(context.TODO(), client.ObjectKey{Namespace: namespace, Name: name}, obj)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get Deployment: %w", err)
+		return nil, nil, fmt.Errorf("failed to get ReplicaSet: %w", err)
 	}
 	return obj.Spec.Template.DeepCopy(), obj.Spec.Replicas, nil
 }
@@ -143,9 +188,10 @@ type statefulSet struct{ scalableObjectTemplateResolver }
 
 // GetTemplateAndReplicas returns the pod spec template of the passed object name and namespace
 func (s *statefulSet) GetTemplateAndReplicas(namespace, name string) (*corev1.PodTemplateSpec, *int32, error) {
-	obj, err := s.client.GetStatefulSet(namespace, name)
+	obj := &appsv1.StatefulSet{}
+	err := s.client.Get(context.TODO(), client.ObjectKey{Namespace: namespace, Name: name}, obj)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get Deployment: %w", err)
+		return nil, nil, fmt.Errorf("failed to get StatefulSet: %w", err)
 	}
 	return obj.Spec.Template.DeepCopy(), obj.Spec.Replicas, nil
 }
@@ -154,9 +200,10 @@ type replicationController struct{ scalableObjectTemplateResolver }
 
 // GetTemplateAndReplicas returns the pod spec template of the passed object name and namespace
 func (s *replicationController) GetTemplateAndReplicas(namespace, name string) (*corev1.PodTemplateSpec, *int32, error) {
-	obj, err := s.client.GetReplicationController(namespace, name)
+	obj := &corev1.ReplicationController{}
+	err := s.client.Get(context.TODO(), client.ObjectKey{Namespace: namespace, Name: name}, obj)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get Deployment: %w", err)
+		return nil, nil, fmt.Errorf("failed to get ReplicationController: %w", err)
 	}
 	return obj.Spec.Template.DeepCopy(), obj.Spec.Replicas, nil
 }
@@ -165,9 +212,10 @@ type job struct{ scalableObjectTemplateResolver }
 
 // GetTemplateAndReplicas returns the pod spec template of the passed object name and namespace
 func (s *job) GetTemplateAndReplicas(namespace, name string) (*corev1.PodTemplateSpec, *int32, error) {
-	obj, err := s.client.GetJob(namespace, name)
+	obj := &batchv1.Job{}
+	err := s.client.Get(context.TODO(), client.ObjectKey{Namespace: namespace, Name: name}, obj)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get Deployment: %w", err)
+		return nil, nil, fmt.Errorf("failed to get Job: %w", err)
 	}
 	return obj.Spec.Template.DeepCopy(), obj.Spec.Parallelism, nil
 }

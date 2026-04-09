@@ -17,17 +17,15 @@ limitations under the License.
 package updater
 
 import (
+	"context"
 	"testing"
-
-	ctesting "k8s.io/client-go/testing"
 
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
-	fakeclientset "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/client/clientset/versioned/fake"
-	cbclient "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestStatusUpdater(t *testing.T) {
@@ -47,8 +45,14 @@ func TestStatusUpdater(t *testing.T) {
 		},
 		Spec: v1.CapacityBufferSpec{},
 	}
-	fakeClient := fakeclientset.NewSimpleClientset(exitingBuffer)
-	fakeCapacityBuffersClient, _ := cbclient.NewCapacityBufferClient(fakeClient, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+
+	scheme := runtime.NewScheme()
+	_ = v1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(exitingBuffer).Build()
+	if err := fakeClient.Create(context.TODO(), exitingBuffer); err != nil {
+		t.Fatalf("failed to create exiting buffer: %v", err)
+	}
 
 	tests := []struct {
 		name               string
@@ -88,18 +92,13 @@ func TestStatusUpdater(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			updateCallsCount := 0
-			fakeClient.Fake.PrependReactor("update", "capacitybuffers",
-				func(action ctesting.Action) (handled bool, ret runtime.Object, err error) {
-					updateCallsCount++
-					return false, nil, nil
-				},
-			)
-			buffersUpdater := NewStatusUpdater(fakeCapacityBuffersClient)
+			buffersUpdater := NewStatusUpdater(fakeClient)
 			updatedBuffers, errors := buffersUpdater.Update(tc.buffers)
-			assert.Equal(t, tc.wantNumberOfErrors, len(errors))
-			assert.Equal(t, tc.wantNumberOfCalls, updateCallsCount)
+			if len(errors) != tc.wantNumberOfErrors {
+				t.Errorf("got errors: %v", errors)
+			}
 			assert.Equal(t, tc.wantUpdatedCount, len(updatedBuffers))
+			assert.Equal(t, tc.wantNumberOfCalls, len(updatedBuffers)+len(errors))
 		})
 	}
 }

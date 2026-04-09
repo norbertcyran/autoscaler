@@ -17,6 +17,7 @@ limitations under the License.
 package metrics
 
 import (
+	"context"
 	"strconv"
 	"time"
 
@@ -24,12 +25,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
-	cbclient "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/client"
 	filters "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/filters"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/klogx"
 	"k8s.io/component-base/metrics/legacyregistry"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/clock"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -46,20 +47,16 @@ var (
 	)
 )
 
-type capacityBufferClient interface {
-	ListCapacityBuffers(namespace string) ([]*v1beta1.CapacityBuffer, error)
-}
-
 // reconciliationTimestampCollector is a prometheus.Collector that collects capacity buffer reconciliation interval metrics.
 type reconciliationTimestampCollector struct {
-	client                 capacityBufferClient
+	client                 client.Client
 	reconciledBuffers      *ReconciliationCache
 	supportedBuffersFilter filters.Filter
 	clock                  clock.Clock
 }
 
 // NewReconciliationTimestampCollector creates a new collector instance.
-func NewReconciliationTimestampCollector(client capacityBufferClient, strategies []string, reconciledBuffers *ReconciliationCache, clock clock.Clock) *reconciliationTimestampCollector {
+func NewReconciliationTimestampCollector(client client.Client, strategies []string, reconciledBuffers *ReconciliationCache, clock clock.Clock) *reconciliationTimestampCollector {
 	return &reconciliationTimestampCollector{
 		client:                 client,
 		reconciledBuffers:      reconciledBuffers,
@@ -69,7 +66,7 @@ func NewReconciliationTimestampCollector(client capacityBufferClient, strategies
 }
 
 // RegisterReconciliationTimestampCollector registers the reconciliation timestamp collector.
-func RegisterReconciliationTimestampCollector(client *cbclient.CapacityBufferClient, strategies []string, reconciledBuffers *ReconciliationCache, clock clock.Clock) {
+func RegisterReconciliationTimestampCollector(client client.Client, strategies []string, reconciledBuffers *ReconciliationCache, clock clock.Clock) {
 	collector := NewReconciliationTimestampCollector(client, strategies, reconciledBuffers, clock)
 	legacyregistry.MustRegister(collector)
 }
@@ -82,10 +79,16 @@ func (c *reconciliationTimestampCollector) Describe(ch chan<- *prometheus.Desc) 
 // Collect implements the prometheus.Collector interface.
 func (c *reconciliationTimestampCollector) Collect(ch chan<- prometheus.Metric) {
 	// List all capacity buffers
-	buffers, err := c.client.ListCapacityBuffers("")
+	bufferList := &v1beta1.CapacityBufferList{}
+	err := c.client.List(context.TODO(), bufferList, client.InNamespace(""))
 	if err != nil {
 		klog.Errorf("Failed to list capacity buffers with error: %v", err.Error())
 		return
+	}
+
+	buffers := make([]*v1beta1.CapacityBuffer, len(bufferList.Items))
+	for i := range bufferList.Items {
+		buffers[i] = &bufferList.Items[i]
 	}
 
 	// Delete buffers that no longer exist from cache
