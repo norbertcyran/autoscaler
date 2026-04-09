@@ -17,7 +17,6 @@ limitations under the License.
 package capacitybufferpodlister
 
 import (
-	"context"
 	"fmt"
 	"strconv"
 	"testing"
@@ -25,7 +24,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	apiv1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	"k8s.io/autoscaler/cluster-autoscaler/capacitybuffer"
-	"k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/client"
 	"k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/fakepods"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/drain"
 
@@ -34,9 +32,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 
-	buffersfake "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/client/clientset/versioned/fake"
 	testutil "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/testutil"
-	fakeclient "k8s.io/client-go/kubernetes/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 var (
@@ -188,11 +186,17 @@ func TestPodListProcessor(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			fakeKubernetesClient := fakeclient.NewSimpleClientset(test.objectsInKubernetesClient...)
-			fakeBuffersClient := buffersfake.NewSimpleClientset(test.objectsInBuffersClient...)
-			fakeCapacityBuffersClient, _ := client.NewCapacityBufferClientFromClients(fakeBuffersClient, fakeKubernetesClient, nil, nil)
+			scheme := runtime.NewScheme()
+			_ = corev1.AddToScheme(scheme)
+			_ = apiv1.AddToScheme(scheme)
 
-			processor := NewCapacityBufferPodListProcessor(fakeCapacityBuffersClient, []string{testProvStrategyAllowed}, fakepods.NewRegistry(nil), test.forceSafeToEvict)
+			var objs []runtime.Object
+			objs = append(objs, test.objectsInKubernetesClient...)
+			objs = append(objs, test.objectsInBuffersClient...)
+
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
+
+			processor := NewCapacityBufferPodListProcessor(fakeClient, []string{testProvStrategyAllowed}, fakepods.NewRegistry(nil), test.forceSafeToEvict)
 			resUnschedulablePods, err := processor.Process(nil, test.unschedulablePods)
 			assert.Equal(t, err != nil, test.expectError)
 
@@ -210,7 +214,8 @@ func TestPodListProcessor(t *testing.T) {
 			assert.Equal(t, test.expectedUnschedFakePodsCount, numberOfFakePods)
 
 			for bufferName, expectedCondition := range test.expectedBuffersProvCondition {
-				buffer, err := fakeBuffersClient.AutoscalingV1beta1().CapacityBuffers(corev1.NamespaceDefault).Get(context.TODO(), bufferName, metav1.GetOptions{})
+				var buffer apiv1.CapacityBuffer
+				err := fakeClient.Get(t.Context(), client.ObjectKey{Namespace: corev1.NamespaceDefault, Name: bufferName}, &buffer)
 				assert.Equal(t, err, nil)
 				found := false
 				for _, cond := range buffer.Status.Conditions {
@@ -260,12 +265,18 @@ func TestCapacityBufferFakePodsRegistry(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			fakeKubernetesClient := fakeclient.NewSimpleClientset(test.objectsInKubernetesClient...)
-			fakeBuffersClient := buffersfake.NewSimpleClientset(test.objectsInBuffersClient...)
-			fakeCapacityBuffersClient, _ := client.NewCapacityBufferClientFromClients(fakeBuffersClient, fakeKubernetesClient, nil, nil)
+			scheme := runtime.NewScheme()
+			_ = corev1.AddToScheme(scheme)
+			_ = apiv1.AddToScheme(scheme)
+
+			var objs []runtime.Object
+			objs = append(objs, test.objectsInKubernetesClient...)
+			objs = append(objs, test.objectsInBuffersClient...)
+
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 
 			registry := fakepods.NewRegistry(nil)
-			processor := NewCapacityBufferPodListProcessor(fakeCapacityBuffersClient, []string{testProvStrategyAllowed}, registry, false)
+			processor := NewCapacityBufferPodListProcessor(fakeClient, []string{testProvStrategyAllowed}, registry, false)
 			resUnschedulablePods, err := processor.Process(nil, test.unschedulablePods)
 			assert.Equal(t, nil, err)
 			assert.Equal(t, test.expectedUnschedPodsCount, len(resUnschedulablePods))

@@ -21,20 +21,22 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
-	cbclient "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/client"
 	"k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/common"
 	"k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/fakepods"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 // podTemplateBufferTranslator translates podTemplateRef buffers specs to fill their status.
 type podTemplateBufferTranslator struct {
-	client   *cbclient.CapacityBufferClient
+	client   client.Client
 	resolver fakepods.Resolver
 }
 
 // NewPodTemplateBufferTranslator creates an instance of podTemplateBufferTranslator.
-func NewPodTemplateBufferTranslator(client *cbclient.CapacityBufferClient, resolver fakepods.Resolver) *podTemplateBufferTranslator {
+func NewPodTemplateBufferTranslator(client client.Client, resolver fakepods.Resolver) *podTemplateBufferTranslator {
 	return &podTemplateBufferTranslator{
 		client:   client,
 		resolver: resolver,
@@ -43,6 +45,7 @@ func NewPodTemplateBufferTranslator(client *cbclient.CapacityBufferClient, resol
 
 // Translate translates buffers podTemplateRef specs to fill their status.
 func (t *podTemplateBufferTranslator) Translate(buffers []*v1.CapacityBuffer) []error {
+	ctx := context.TODO()
 	var errs []error
 	var podTemplateRef *v1.LocalObjectRef
 	for _, buffer := range buffers {
@@ -50,14 +53,15 @@ func (t *podTemplateBufferTranslator) Translate(buffers []*v1.CapacityBuffer) []
 			continue
 		}
 		podTemplateRef = buffer.Spec.PodTemplateRef
-		sourcePodTemplate, err := t.client.GetPodTemplate(buffer.Namespace, podTemplateRef.Name)
+		sourcePodTemplate := &corev1.PodTemplate{}
+		err := t.client.Get(ctx, client.ObjectKey{Namespace: buffer.Namespace, Name: podTemplateRef.Name}, sourcePodTemplate)
 		if err != nil {
 			common.SetBufferAsNotReadyForProvisioning(buffer, nil, nil, nil, buffer.Spec.ProvisioningStrategy, err)
 			errs = append(errs, err)
 			continue
 		}
 
-		managedPodTemplate, err := t.ensureManagedPodTemplate(context.TODO(), buffer, sourcePodTemplate)
+		managedPodTemplate, err := t.ensureManagedPodTemplate(ctx, buffer, sourcePodTemplate)
 		if err != nil {
 			errs = append(errs, err)
 			common.SetBufferAsNotReadyForProvisioning(buffer, nil, nil, nil, buffer.Spec.ProvisioningStrategy, err)
@@ -86,12 +90,23 @@ func (t *podTemplateBufferTranslator) ensureManagedPodTemplate(ctx context.Conte
 
 	newSpec := getPodTemplateSpecFromPod(fakePod)
 	targetPodTemplate := getPodTemplateFromSpec(newSpec, buffer)
-	managedPodTemplate, err := t.client.EnsurePodTemplate(ctx, targetPodTemplate)
+
+	pt := &corev1.PodTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: targetPodTemplate.Namespace,
+			Name:      targetPodTemplate.Name,
+		},
+	}
+	_, err = controllerutil.CreateOrUpdate(ctx, t.client, pt, func() error {
+		pt.OwnerReferences = targetPodTemplate.OwnerReferences
+		pt.Template = targetPodTemplate.Template
+		return nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create or update managed pod template: %v", err)
 	}
 
-	return managedPodTemplate, nil
+	return pt, nil
 }
 
 func isPodTemplateBasedBuffer(buffer *v1.CapacityBuffer) bool {

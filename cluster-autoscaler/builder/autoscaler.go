@@ -23,7 +23,7 @@ import (
 	cbv1beta1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	provreqclientset "k8s.io/autoscaler/cluster-autoscaler/apis/provisioningrequest/client/clientset/versioned"
 	"k8s.io/autoscaler/cluster-autoscaler/capacitybuffer"
-	capacityclient "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/client"
+
 	cbctrl "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/controller"
 	"k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/fakepods"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
@@ -55,7 +55,6 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/options"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/scheduling"
-	kube_util "k8s.io/autoscaler/cluster-autoscaler/utils/kubernetes"
 
 	cbmetrics "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/metrics"
 	"k8s.io/client-go/informers"
@@ -190,37 +189,30 @@ func (b *AutoscalerBuilder) Build(ctx context.Context) (core.Autoscaler, *loop.L
 		provisioningRequestInjector = injector
 	}
 
-	var capacitybufferClient *capacityclient.CapacityBufferClient
-	var capacitybufferClientError error
 	var fakePodsResolver fakepods.Resolver
 	if autoscalingOptions.CapacitybufferControllerEnabled {
-		restConfig := kube_util.GetKubeConfig(autoscalingOptions.KubeClientOpts)
-		capacitybufferClient, capacitybufferClientError = capacityclient.NewCapacityBufferClientFromConfig(restConfig)
-		if capacitybufferClientError == nil && capacitybufferClient != nil {
-			if autoscalingOptions.CapacityBufferPodDryRunEnabled {
-				fakePodsResolver = fakepods.NewDryRunResolver(b.kubeClient)
-			} else {
-				fakePodsResolver = fakepods.NewDefaultingResolver()
-			}
-			realClock := clock.RealClock{}
-			reconciliationCache := cbmetrics.NewReconciliationCache()
-			defaultStrategies := []string{capacitybuffer.ActiveProvisioningStrategy, ""}
-			
-			reconciler := cbctrl.NewCapacityBufferReconciler(
-				b.manager.GetClient(),
-				capacitybufferClient,
-				fakePodsResolver,
-				defaultStrategies,
-				reconciliationCache,
-				realClock,
-			)
-			
-			if err := reconciler.SetupWithManager(ctx, b.manager); err != nil {
-				klog.Errorf("Failed to setup CapacityBuffer controller: %v", err)
-			}
-			
-			cbmetrics.RegisterReconciliationTimestampCollector(capacitybufferClient, defaultStrategies, reconciliationCache, realClock)
+		if autoscalingOptions.CapacityBufferPodDryRunEnabled {
+			fakePodsResolver = fakepods.NewDryRunResolver(b.kubeClient)
+		} else {
+			fakePodsResolver = fakepods.NewDefaultingResolver()
 		}
+		realClock := clock.RealClock{}
+		reconciliationCache := cbmetrics.NewReconciliationCache()
+		defaultStrategies := []string{capacitybuffer.ActiveProvisioningStrategy, ""}
+
+		reconciler := cbctrl.NewCapacityBufferReconciler(
+			b.manager.GetClient(),
+			fakePodsResolver,
+			defaultStrategies,
+			reconciliationCache,
+			realClock,
+		)
+
+		if err := reconciler.SetupWithManager(ctx, b.manager); err != nil {
+			klog.Errorf("Failed to setup CapacityBuffer controller: %v", err)
+		}
+
+		cbmetrics.RegisterReconciliationTimestampCollector(b.manager.GetClient(), defaultStrategies, reconciliationCache, realClock)
 	}
 
 	if autoscalingOptions.CapacitybufferPodInjectionEnabled {
@@ -228,21 +220,15 @@ func (b *AutoscalerBuilder) Build(ctx context.Context) (core.Autoscaler, *loop.L
 		if err := cbv1beta1.AddToScheme(clientgoscheme.Scheme); err != nil {
 			klog.Warningf("Failed to add CapacityBuffer (v1beta1) to scheme: %v", err)
 		}
-		if capacitybufferClient == nil {
-			restConfig := kube_util.GetKubeConfig(autoscalingOptions.KubeClientOpts)
-			capacitybufferClient, capacitybufferClientError = capacityclient.NewCapacityBufferClientFromConfig(restConfig)
-		}
-		if capacitybufferClientError == nil && capacitybufferClient != nil {
-			buffersPodsRegistry := fakepods.NewRegistry(nil)
-			opts.CapacityBufferPodsRegistry = buffersPodsRegistry
-			bufferPodInjector := cbprocessor.NewCapacityBufferPodListProcessor(
-				capacitybufferClient,
-				[]string{capacitybuffer.ActiveProvisioningStrategy},
-				buffersPodsRegistry, true)
-			podListProcessor = pods.NewCombinedPodListProcessor([]pods.PodListProcessor{bufferPodInjector, podListProcessor})
-			opts.Processors.ScaleUpStatusProcessor = status.NewCombinedScaleUpStatusProcessor([]status.ScaleUpStatusProcessor{
-				cbprocessor.NewFakePodsScaleUpStatusProcessor(buffersPodsRegistry), opts.Processors.ScaleUpStatusProcessor})
-		}
+		buffersPodsRegistry := fakepods.NewRegistry(nil)
+		opts.CapacityBufferPodsRegistry = buffersPodsRegistry
+		bufferPodInjector := cbprocessor.NewCapacityBufferPodListProcessor(
+			b.manager.GetClient(),
+			[]string{capacitybuffer.ActiveProvisioningStrategy},
+			buffersPodsRegistry, true)
+		podListProcessor = pods.NewCombinedPodListProcessor([]pods.PodListProcessor{bufferPodInjector, podListProcessor})
+		opts.Processors.ScaleUpStatusProcessor = status.NewCombinedScaleUpStatusProcessor([]status.ScaleUpStatusProcessor{
+			cbprocessor.NewFakePodsScaleUpStatusProcessor(buffersPodsRegistry), opts.Processors.ScaleUpStatusProcessor})
 	}
 
 	if autoscalingOptions.ProactiveScaleupEnabled {

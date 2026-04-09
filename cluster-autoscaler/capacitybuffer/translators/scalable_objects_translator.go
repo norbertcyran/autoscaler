@@ -21,24 +21,26 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apiv1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
-	cbclient "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/client"
 	"k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/common"
 	"k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/fakepods"
 	scalableobject "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/translators/scalable_objects"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 // ScalableObjectsTranslator translates buffers processors into pod capacity.
 type ScalableObjectsTranslator struct {
-	client             *cbclient.CapacityBufferClient
+	client             client.Client
 	resolver           fakepods.Resolver
 	scaleResolver      *scalableobject.ScaleObjectPodResolver
 	supportedResolvers map[string]scalableobject.ScalableObjectTemplateResolver
 }
 
 // NewDefaultScalableObjectsTranslator creates an instance of ScalableObjectsTranslator.
-func NewDefaultScalableObjectsTranslator(client *cbclient.CapacityBufferClient, resolver fakepods.Resolver) *ScalableObjectsTranslator {
+func NewDefaultScalableObjectsTranslator(client client.Client, resolver fakepods.Resolver) *ScalableObjectsTranslator {
 	supportedResolvers := map[string]scalableobject.ScalableObjectTemplateResolver{}
 	for _, scalableObject := range scalableobject.GetSupportedScalableObjectResolvers(client) {
 		supportedResolvers[scalableObject.GetResolverKey()] = scalableObject
@@ -149,7 +151,22 @@ func (t *ScalableObjectsTranslator) resolveSpecAndReplicas(ctx context.Context, 
 func (t *ScalableObjectsTranslator) ensureManagedPodTemplate(ctx context.Context, buffer *apiv1.CapacityBuffer, spec *corev1.PodTemplateSpec) (*corev1.PodTemplate, error) {
 	targetPodTemplate := getPodTemplateFromSpec(spec, buffer)
 
-	return t.client.EnsurePodTemplate(ctx, targetPodTemplate)
+	pt := &corev1.PodTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: targetPodTemplate.Namespace,
+			Name:      targetPodTemplate.Name,
+		},
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, t.client, pt, func() error {
+		pt.OwnerReferences = targetPodTemplate.OwnerReferences
+		pt.Template = targetPodTemplate.Template
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create or update managed pod template: %v", err)
+	}
+
+	return pt, nil
 }
 
 func isScalableObjectBuffer(buffer *apiv1.CapacityBuffer) bool {

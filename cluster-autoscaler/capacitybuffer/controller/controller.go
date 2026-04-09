@@ -31,7 +31,6 @@ import (
 	"k8s.io/utils/clock"
 
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
-	cbclient "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/client"
 	"k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/fakepods"
 	filters "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/filters"
 	cbmetrics "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/metrics"
@@ -56,7 +55,6 @@ const (
 
 // CapacityBufferReconciler performs updates on Buffers and convert them to pods to be injected
 type CapacityBufferReconciler struct {
-	cbClient                *cbclient.CapacityBufferClient
 	client                  client.Client
 	strategyFilter          filters.Filter
 	translator              translators.Translator
@@ -69,7 +67,6 @@ type CapacityBufferReconciler struct {
 // NewCapacityBufferReconciler creates a new CapacityBufferReconciler
 func NewCapacityBufferReconciler(
 	client client.Client,
-	cbClient *cbclient.CapacityBufferClient,
 	resolver fakepods.Resolver,
 	strategies []string,
 	reconciliationTimeCache *cbmetrics.ReconciliationCache,
@@ -77,16 +74,15 @@ func NewCapacityBufferReconciler(
 ) *CapacityBufferReconciler {
 	return &CapacityBufferReconciler{
 		client:         client,
-		cbClient:       cbClient,
 		strategyFilter: filters.NewStrategyFilter(strategies),
 		translator: translators.NewCombinedTranslator(
 			[]translators.Translator{
-				translators.NewPodTemplateBufferTranslator(cbClient, resolver),
-				translators.NewDefaultScalableObjectsTranslator(cbClient, resolver),
+				translators.NewPodTemplateBufferTranslator(client, resolver),
+				translators.NewDefaultScalableObjectsTranslator(client, resolver),
 			},
 		),
 		quotaAllocator:          newResourceQuotaAllocator(client),
-		updater:                 *updater.NewStatusUpdater(cbClient),
+		updater:                 *updater.NewStatusUpdater(client),
 		clock:                   clock,
 		reconciliationTimeCache: reconciliationTimeCache,
 	}
@@ -136,7 +132,7 @@ func (r *CapacityBufferReconciler) SetupWithManager(ctx context.Context, mgr man
 		}), builder.WithPredicates(rqPredicate)).
 		Watches(&corev1.PodTemplate{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
 			template := obj.(*corev1.PodTemplate)
-			
+
 			var buffers v1.CapacityBufferList
 			err := r.client.List(ctx, &buffers, client.InNamespace(template.Namespace), client.MatchingFields{podTemplateRefIndex: template.Name})
 			if err != nil {
@@ -155,12 +151,12 @@ func (r *CapacityBufferReconciler) SetupWithManager(ctx context.Context, mgr man
 			if err := mgr.GetClient().List(ctx, &buffers); err != nil {
 				return nil
 			}
-			
+
 			namespaces := make(map[string]bool)
 			for _, b := range buffers.Items {
 				namespaces[b.Namespace] = true
 			}
-			
+
 			var requests []reconcile.Request
 			for ns := range namespaces {
 				requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Name: ns}})
@@ -262,5 +258,3 @@ func (r *CapacityBufferReconciler) updateReconciliationTimeCache(buffers []*v1.C
 	}
 	r.reconciliationTimeCache.Update(buffers, r.clock.Now())
 }
-
-

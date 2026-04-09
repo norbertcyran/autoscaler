@@ -17,6 +17,7 @@ limitations under the License.
 package capacitybufferpodlister
 
 import (
+	"context"
 	"fmt"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -28,12 +29,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	"k8s.io/autoscaler/cluster-autoscaler/capacitybuffer"
-	"k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/client"
 	"k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/common"
 	"k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/fakepods"
 	buffersfilter "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/filters"
 	ca_context "k8s.io/autoscaler/cluster-autoscaler/context"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/drain"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // Pods annotation keys and values for fake pods created by capacity buffer pod list processor
@@ -56,7 +57,7 @@ const (
 // CapacityBufferPodListProcessor processes the pod lists before scale up
 // and adds buffres api virtual pods.
 type CapacityBufferPodListProcessor struct {
-	client                   *client.CapacityBufferClient
+	client                   client.Client
 	statusFilter             buffersfilter.Filter
 	podTemplateGenFilter     buffersfilter.Filter
 	provStrategies           map[string]bool
@@ -65,7 +66,7 @@ type CapacityBufferPodListProcessor struct {
 }
 
 // NewCapacityBufferPodListProcessor creates a new CapacityRequestPodListProcessor.
-func NewCapacityBufferPodListProcessor(client *client.CapacityBufferClient, provStrategies []string, buffersRegistry *fakepods.Registry, forceSafeToEvictFakePods bool) *CapacityBufferPodListProcessor {
+func NewCapacityBufferPodListProcessor(client client.Client, provStrategies []string, buffersRegistry *fakepods.Registry, forceSafeToEvictFakePods bool) *CapacityBufferPodListProcessor {
 	provStrategiesMap := map[string]bool{}
 	for _, ps := range provStrategies {
 		provStrategiesMap[ps] = true
@@ -85,10 +86,16 @@ func NewCapacityBufferPodListProcessor(client *client.CapacityBufferClient, prov
 
 // Process updates unschedulablePods by injecting fake pods to match replicas defined in buffers status
 func (p *CapacityBufferPodListProcessor) Process(autoscalingCtx *ca_context.AutoscalingContext, unschedulablePods []*apiv1.Pod) ([]*apiv1.Pod, error) {
-	buffers, err := p.client.ListCapacityBuffers("")
+	ctx := context.TODO()
+	var buffersList v1beta1.CapacityBufferList
+	err := p.client.List(ctx, &buffersList)
 	if err != nil {
 		klog.Errorf("CapacityBufferPodListProcessor failed to list buffers with error: %v", err.Error())
 		return unschedulablePods, nil
+	}
+	buffers := make([]*v1beta1.CapacityBuffer, len(buffersList.Items))
+	for i := range buffersList.Items {
+		buffers[i] = &buffersList.Items[i]
 	}
 	buffers = p.filterBuffersProvStrategy(buffers)
 	_, buffers = p.statusFilter.Filter(buffers)
@@ -96,7 +103,7 @@ func (p *CapacityBufferPodListProcessor) Process(autoscalingCtx *ca_context.Auto
 
 	totalFakePods := []*apiv1.Pod{}
 	for _, buffer := range buffers {
-		fakePods := p.provision(buffer)
+		fakePods := p.provision(ctx, buffer)
 		p.updateCapacityBufferRegistry(fakePods, buffer)
 		totalFakePods = append(totalFakePods, fakePods...)
 	}
@@ -125,28 +132,29 @@ func (p *CapacityBufferPodListProcessor) clearCapacityBufferRegistry() {
 	p.buffersRegistry.Clear()
 }
 
-func (p *CapacityBufferPodListProcessor) provision(buffer *v1beta1.CapacityBuffer) []*apiv1.Pod {
+func (p *CapacityBufferPodListProcessor) provision(ctx context.Context, buffer *v1beta1.CapacityBuffer) []*apiv1.Pod {
 	if buffer.Status.PodTemplateRef == nil || buffer.Status.Replicas == nil || meta.IsStatusConditionFalse(buffer.Status.Conditions, capacitybuffer.ReadyForProvisioningCondition) {
 		changed := common.UpdateBufferStatusToFailedProvisioning(buffer, NotReadyForProvisioningReason, "CapacityBuffer is not ready for provisioning")
 		if changed {
-			p.updateBufferStatus(buffer)
+			p.updateBufferStatus(ctx, buffer)
 		}
 		return []*apiv1.Pod{}
 	}
 	if *buffer.Status.Replicas == 0 {
 		changed := common.UpdateBufferStatusToFailedProvisioning(buffer, BufferIsEmptyReason, "CapacityBuffer has zero replicas")
 		if changed {
-			p.updateBufferStatus(buffer)
+			p.updateBufferStatus(ctx, buffer)
 		}
 		return []*apiv1.Pod{}
 	}
 	podTemplateName := buffer.Status.PodTemplateRef.Name
 	replicas := buffer.Status.Replicas
-	podTemplate, err := p.client.GetPodTemplate(buffer.Namespace, podTemplateName)
+	var podTemplate apiv1.PodTemplate
+	err := p.client.Get(ctx, client.ObjectKey{Namespace: buffer.Namespace, Name: podTemplateName}, &podTemplate)
 	if err != nil {
 		changed := common.UpdateBufferStatusToFailedProvisioning(buffer, FailedToGetPodTemplateReason, fmt.Sprintf("failed to get pod template with error: %v", err.Error()))
 		if changed {
-			p.updateBufferStatus(buffer)
+			p.updateBufferStatus(ctx, buffer)
 		}
 		return []*apiv1.Pod{}
 	}
@@ -154,12 +162,12 @@ func (p *CapacityBufferPodListProcessor) provision(buffer *v1beta1.CapacityBuffe
 	if err != nil {
 		changed := common.UpdateBufferStatusToFailedProvisioning(buffer, FailedToMakeFakePodsReason, fmt.Sprintf("failed to create fake pods with error: %v", err.Error()))
 		if changed {
-			p.updateBufferStatus(buffer)
+			p.updateBufferStatus(ctx, buffer)
 		}
 		return []*apiv1.Pod{}
 	}
 	common.UpdateBufferStatusToSuccessfullyProvisioning(buffer, FakePodsInjectedReason)
-	p.updateBufferStatus(buffer)
+	p.updateBufferStatus(ctx, buffer)
 	return fakePods
 }
 
@@ -173,8 +181,8 @@ func (p *CapacityBufferPodListProcessor) filterBuffersProvStrategy(buffers []*v1
 	return filteredBuffers
 }
 
-func (p *CapacityBufferPodListProcessor) updateBufferStatus(buffer *v1beta1.CapacityBuffer) {
-	_, err := p.client.UpdateCapacityBuffer(buffer)
+func (p *CapacityBufferPodListProcessor) updateBufferStatus(ctx context.Context, buffer *v1beta1.CapacityBuffer) {
+	err := p.client.Update(ctx, buffer)
 	if err != nil {
 		klog.Errorf("Failed to update buffer status for buffer %v, error: %v", buffer.Name, err.Error())
 	}

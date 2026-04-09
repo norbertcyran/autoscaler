@@ -17,18 +17,21 @@ limitations under the License.
 package filter
 
 import (
+	"context"
+
+	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
-	cbclient "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/client"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // podTemplateGenerationChangedFilter filters in buffers that has pod template that its generation changeed
 type podTemplateGenerationChangedFilter struct {
-	client *cbclient.CapacityBufferClient
+	client client.Client
 }
 
 // NewPodTemplateGenerationChangedFilter creates an instance of podTemplateGenerationChangedFilter that filters the buffers with pod templates that needs to be updated.
-func NewPodTemplateGenerationChangedFilter(client *cbclient.CapacityBufferClient) *podTemplateGenerationChangedFilter {
+func NewPodTemplateGenerationChangedFilter(client client.Client) *podTemplateGenerationChangedFilter {
 	return &podTemplateGenerationChangedFilter{
 		client: client,
 	}
@@ -54,7 +57,8 @@ func (f *podTemplateGenerationChangedFilter) podTemplateGenerationChanged(buffer
 		return false
 	}
 
-	podTemplate, err := f.client.GetPodTemplate(buffer.Namespace, buffer.Status.PodTemplateRef.Name)
+	podTemplate := &corev1.PodTemplate{}
+	err := f.client.Get(context.TODO(), client.ObjectKey{Namespace: buffer.Namespace, Name: buffer.Status.PodTemplateRef.Name}, podTemplate)
 
 	if err != nil {
 		klog.Errorf("Couldn't get pod template defined in buffer %v, with error: %v", buffer.Name, err.Error())

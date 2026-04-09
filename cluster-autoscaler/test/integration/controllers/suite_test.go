@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -37,7 +38,6 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	capacitybuffer "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/client/clientset/versioned"
 	cbapi "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer"
-	cbclient "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/client"
 	cbctrl "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/controller"
 	"k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/fakepods"
 	cbmetrics "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/metrics"
@@ -86,9 +86,6 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	Expect(buffersClient).NotTo(BeNil())
 
-	client, err := cbclient.NewCapacityBufferClientFromConfig(cfg)
-	Expect(err).NotTo(HaveOccurred())
-
 	resolver := fakepods.NewDryRunResolver(k8sClient)
 	reconciliationCache = cbmetrics.NewReconciliationCache()
 
@@ -103,33 +100,31 @@ var _ = BeforeSuite(func() {
 
 	realClock := clock.RealClock{}
 	defaultStrategies := []string{cbapi.ActiveProvisioningStrategy, ""}
-	
+
 	reconciler := cbctrl.NewCapacityBufferReconciler(
 		mgr.GetClient(),
-		client,
 		resolver,
 		defaultStrategies,
 		reconciliationCache,
 		realClock,
 	)
-	
+
 	err = reconciler.SetupWithManager(ctx, mgr)
 	Expect(err).NotTo(HaveOccurred())
-	
 
 	go func() {
+		defer GinkgoRecover()
 		err := mgr.Start(ctx)
 		Expect(err).NotTo(HaveOccurred())
 	}()
 })
 
 var _ = AfterSuite(func() {
-	cancel()
 	By("tearing down the test environment")
-	err := testEnv.Stop()
-	if err != nil {
-		logf.Log.Error(err, "failed to stop test environment")
-	}
+	cancel()
+	Eventually(func() error {
+		return testEnv.Stop()
+	}, time.Minute, time.Second).Should(Succeed())
 })
 
 // getFirstFoundEnvTestBinaryDir locates the first binary in the specified path.

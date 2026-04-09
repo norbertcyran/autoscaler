@@ -22,10 +22,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
-	cbclient "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/client"
 	"k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/testutil"
-	fakeclient "k8s.io/client-go/kubernetes/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestPodTemplateGenerationFilter(t *testing.T) {
@@ -43,8 +43,11 @@ func TestPodTemplateGenerationFilter(t *testing.T) {
 			Generation: 4,
 		},
 	}
-	fakeClient := fakeclient.NewSimpleClientset(podTempGen3, podTempGen4)
-	fakeCapacityBuffersClient, _ := cbclient.NewCapacityBufferClient(nil, fakeClient, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = v1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(podTempGen3, podTempGen4).Build()
 
 	tests := []struct {
 		name                       string
@@ -100,7 +103,7 @@ func TestPodTemplateGenerationFilter(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			generationFilter := NewPodTemplateGenerationChangedFilter(fakeCapacityBuffersClient)
+			generationFilter := NewPodTemplateGenerationChangedFilter(fakeClient)
 			filtered, filteredOut := generationFilter.Filter(test.buffers)
 			assert.ElementsMatch(t, test.expectedFilteredBuffers, filtered)
 			assert.ElementsMatch(t, test.expectedFilteredOutBuffers, filteredOut)

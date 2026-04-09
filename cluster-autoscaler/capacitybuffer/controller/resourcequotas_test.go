@@ -496,7 +496,7 @@ func TestResourceQuotaAllocator(t *testing.T) {
 			scheme := runtime.NewScheme()
 			assert.NoError(t, corev1.AddToScheme(scheme))
 			assert.NoError(t, v1.AddToScheme(scheme))
-			
+
 			fakeClient := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 			allocator := newResourceQuotaAllocator(fakeClient)
 

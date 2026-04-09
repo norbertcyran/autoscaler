@@ -24,30 +24,22 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	filters "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/filters"
 	clocktesting "k8s.io/utils/clock/testing"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
-
-type fakeClient struct {
-	buffers []*v1beta1.CapacityBuffer
-}
-
-func (m *fakeClient) ListCapacityBuffers(namespace string) ([]*v1beta1.CapacityBuffer, error) {
-	return m.buffers, nil
-}
-
-func newFakeClient(buffers []*v1beta1.CapacityBuffer) *fakeClient {
-	return &fakeClient{buffers: buffers}
-}
 
 func newTestCapacityBuffer(uid, strategy string, creationTime time.Time, conditions []metav1.Condition) *v1beta1.CapacityBuffer {
 	return &v1beta1.CapacityBuffer{
 		ObjectMeta: metav1.ObjectMeta{
+			Name:              uid,
 			UID:               types.UID(uid),
 			CreationTimestamp: metav1.Time{Time: creationTime},
+			Namespace:         "default",
 		},
 		Spec: v1beta1.CapacityBufferSpec{
 			ProvisioningStrategy: ptr.To(strategy),
@@ -166,7 +158,16 @@ func TestReconciliationTimestampCollector_Collect(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeClock := clocktesting.NewFakeClock(now)
 
-			c := newFakeClient(tc.buffers)
+			scheme := runtime.NewScheme()
+			_ = v1beta1.AddToScheme(scheme)
+
+			var runtimeObjs []runtime.Object
+			for _, buf := range tc.buffers {
+				runtimeObjs = append(runtimeObjs, buf)
+			}
+
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(runtimeObjs...).Build()
+
 			reconciledCache := NewReconciliationCache()
 			if len(tc.initialCache) > 0 {
 				// Inject initial cache directly for testing varied timestamps
@@ -179,7 +180,7 @@ func TestReconciliationTimestampCollector_Collect(t *testing.T) {
 			filter := filters.NewStrategyFilter(tc.supportedStrategies)
 
 			collector := &reconciliationTimestampCollector{
-				client:                 c,
+				client:                 fakeClient,
 				reconciledBuffers:      reconciledCache,
 				supportedBuffersFilter: filter,
 				clock:                  fakeClock,

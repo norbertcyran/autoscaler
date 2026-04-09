@@ -27,10 +27,10 @@ import (
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/types"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/common"
 	podutils "k8s.io/autoscaler/cluster-autoscaler/utils/pod"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 type resourceQuotaAllocator struct {
