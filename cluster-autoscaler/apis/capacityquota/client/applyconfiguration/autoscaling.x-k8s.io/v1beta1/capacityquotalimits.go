@@ -29,8 +29,8 @@ import (
 type CapacityQuotaLimitsApplyConfiguration struct {
 	// Resources define resource limits of this quota.
 	//
-	// Currently supported built-in resources: cpu, memory. Additionally,
-	// nodes key can be used to limit the number of existing nodes.
+	// All built-in and extended resources reported in the node capacity are supported.
+	// Additionally, nodes key can be used to limit the number of existing nodes.
 	// All resource quantities must be non-negative integers. Binary and decimal units are allowed as long as the quantity
 	// can be converted to an integer.
 	//
